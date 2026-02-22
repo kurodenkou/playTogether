@@ -62,24 +62,28 @@
     <!-- Canvas + stats ─────────────────────────────────────────────────── -->
     <div class="canvas-area">
       <div class="canvas-wrapper">
-        <!-- Pre-game overlay -->
+
+        <!-- Pre-game overlay ─────────────────────────────────────────── -->
         <div id="preGamePanel">
           <h2>Waiting for host</h2>
-          <p>Share the room code with a friend. The host starts the game when everyone is ready.</p>
+          <p>Share the room code with a friend.<br>
+             The host picks a game and clicks Start.</p>
+
           <div class="controls-hint">
-            <strong>Controls</strong><br>
-            ↑ / W &nbsp;—&nbsp; Move Up<br>
-            ↓ / S &nbsp;—&nbsp; Move Down<br>
-            <br>
-            First to <strong>7 points</strong> wins.
+            <strong>Pong</strong> — ↑↓ / W·S to move · first to 7 wins<br>
+            <strong>NES</strong> &nbsp;— Arrows/WASD · Z=A · X=B · Enter=Start · Shift=Select
           </div>
         </div>
 
-        <!-- Game (hidden until started) -->
-        <div id="gamePanel" class="hidden">
+        <!-- Game canvas (hidden until started) ───────────────────────── -->
+        <div id="gamePanel" class="hidden" style="position:relative;">
           <canvas id="gameCanvas"></canvas>
+
+          <!-- Loading overlay (shown while fetching ROM / initialising) -->
+          <div id="loadingOverlay" class="loading-overlay hidden">Loading…</div>
         </div>
-      </div>
+
+      </div><!-- /canvas-wrapper -->
 
       <!-- Rollback stats HUD -->
       <div class="stats-hud">
@@ -88,27 +92,43 @@
         <span>Rollbacks <b id="hudRollbacks">—</b></span>
         <span>Max depth <b id="hudMaxDepth">—</b></span>
       </div>
-    </div>
+    </div><!-- /canvas-area -->
 
     <!-- Side panel ─────────────────────────────────────────────────────── -->
     <div class="side-panel">
 
-      <!-- Players -->
+      <!-- Players ──────────────────────────────────────────────────────── -->
       <div class="panel-section">
         <h3>Players</h3>
         <ul class="player-list" id="playerList"></ul>
       </div>
 
-      <!-- Host controls -->
+      <!-- Game settings + host controls ───────────────────────────────── -->
       <div class="panel-section">
-        <h3>Controls</h3>
+        <h3>Game</h3>
+
+        <div class="field-group" style="margin-bottom:10px;">
+          <label for="gameTypeSelect">Type</label>
+          <select id="gameTypeSelect">
+            <option value="pong">Pong (built-in demo)</option>
+            <option value="nes">NES emulator</option>
+          </select>
+        </div>
+
+        <div id="romUrlRow" class="field-group hidden" style="margin-bottom:10px;">
+          <label for="romUrlInput">ROM URL (.nes)</label>
+          <input type="text" id="romUrlInput" placeholder="https://example.com/game.nes"
+                 autocomplete="off" spellcheck="false">
+          <span class="field-hint">The URL is fetched server-side (no CORS issues).</span>
+        </div>
+
         <div class="host-controls">
           <button id="startGameBtn" class="primary hidden">Start Game</button>
           <button id="rematchBtn" class="hidden">Rematch</button>
         </div>
       </div>
 
-      <!-- Chat -->
+      <!-- Chat ─────────────────────────────────────────────────────────── -->
       <div class="panel-section chat-section">
         <h3>Chat</h3>
         <div id="chatLog"></div>
@@ -122,9 +142,13 @@
   </div><!-- /room-body -->
 </div><!-- /view-room -->
 
-<!-- ── Scripts (order matters: dependencies first) ────────────────────────── -->
+<!-- ── Scripts ────────────────────────────────────────────────────────────── -->
+<!-- jsnes browser bundle (served from node_modules by the server) -->
+<script src="/js/jsnes.js"></script>
+<!-- Platform scripts (load order: dependencies before dependents) -->
 <script src="js/rollback.js"></script>
 <script src="js/demo-game.js"></script>
+<script src="js/nes-adapter.js"></script>
 <script src="js/network.js"></script>
 <script src="js/input.js"></script>
 <script src="js/app.js"></script>

@@ -19,6 +19,59 @@ const wss = new WebSocket.Server({ server });
 
 app.use(express.static(path.join(__dirname, 'public')));
 
+// ── Serve the jsnes browser bundle ────────────────────────────────────────────
+app.get('/js/jsnes.js', (_req, res) =>
+  res.sendFile(path.join(__dirname, 'node_modules', 'jsnes', 'dist', 'jsnes.js'))
+);
+
+// ── ROM proxy ──────────────────────────────────────────────────────────────────
+// Fetches a .nes ROM from an arbitrary URL and relays the bytes to the browser.
+// This avoids CORS issues when the ROM host doesn't set permissive headers.
+//
+// Security considerations:
+//   • Only HTTP/HTTPS origins are accepted (no file://, data:, etc.)
+//   • The server acts as a forwarding proxy, not a storage layer.
+//   • A 16 MB size limit prevents memory exhaustion.
+app.get('/rom-proxy', async (req, res) => {
+  const romUrl = req.query.url;
+  if (!romUrl) return res.status(400).send('url parameter required');
+
+  let parsed;
+  try { parsed = new URL(romUrl); } catch {
+    return res.status(400).send('Invalid URL');
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    return res.status(400).send('Only HTTP and HTTPS URLs are supported');
+  }
+
+  try {
+    const upstream = await fetch(romUrl, {
+      headers: { 'User-Agent': 'playTogether/1.0' },
+      signal:  AbortSignal.timeout(15_000),
+    });
+    if (!upstream.ok) {
+      return res.status(upstream.status).send(`Upstream error: ${upstream.statusText}`);
+    }
+
+    const contentLength = Number(upstream.headers.get('content-length') ?? 0);
+    if (contentLength > 16 * 1024 * 1024) {
+      return res.status(413).send('ROM too large (max 16 MB)');
+    }
+
+    const buffer = await upstream.arrayBuffer();
+    if (buffer.byteLength > 16 * 1024 * 1024) {
+      return res.status(413).send('ROM too large (max 16 MB)');
+    }
+
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    res.send(Buffer.from(buffer));
+  } catch (err) {
+    console.error('[rom-proxy]', err.message);
+    res.status(500).send(`Failed to fetch ROM: ${err.message}`);
+  }
+});
+
 // ─── Room Management ─────────────────────────────────────────────────────────
 
 const rooms = new Map();       // roomId  -> Room
@@ -163,12 +216,22 @@ wss.on('connection', (ws) => {
         // Shared PRNG seed so all clients start with identical RNG state
         const seed = Date.now() & 0x7fffffff;
 
+        // Validate gameType
+        const gameType = msg.gameType === 'nes' ? 'nes' : 'pong';
+
+        // Only relay romUrl for NES mode; strip for pong to avoid unexpected data
+        const romUrl = gameType === 'nes'
+          ? (typeof msg.romUrl === 'string' ? msg.romUrl.slice(0, 2048) : null)
+          : null;
+
         room.broadcastAll({
           type: 'game-started',
           playerOrder: room.playerOrder,
           seed,
+          gameType,
+          romUrl,
         });
-        console.log(`[room] game started in ${room.id}, players: ${room.playerOrder}`);
+        console.log(`[room] game started in ${room.id} (${gameType}), players: ${room.playerOrder}`);
         break;
       }
 

@@ -6,8 +6,13 @@
  *   #view-lobby  — create / join a room
  *   #view-room   — waiting room + game canvas + chat
  *
- * The WebSocket connection is created once and kept alive for the
- * entire session, so there is no reconnect headache when switching views.
+ * The WebSocket connection is created once and kept alive for the entire
+ * session, so there is no reconnect headache when switching views.
+ *
+ * Game types
+ * ──────────
+ *   pong  — built-in 2-player Pong demo (DemoGame)
+ *   nes   — JSNES-backed NES emulator (NESAdapter), ROM loaded from URL
  */
 
 // ── Globals ───────────────────────────────────────────────────────────────────
@@ -20,7 +25,7 @@ let roomState = null;
 /** @type {RollbackEngine|null} */
 let engine = null;
 
-/** @type {DemoGame|null} */
+/** @type {DemoGame|NESAdapter|null} */
 let game = null;
 
 /** @type {InputManager|null} */
@@ -32,7 +37,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   try {
     await net.connect();
     console.log('[app] WebSocket connected');
-  } catch (err) {
+  } catch {
     showStatus('lobby', 'Could not connect to server.', true);
     return;
   }
@@ -41,7 +46,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   bindNetworkEvents();
   showView('lobby');
 
-  // Restore player name from previous session
   const savedName = localStorage.getItem('playerName');
   if (savedName) el('playerName').value = savedName;
 });
@@ -49,7 +53,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 // ── View management ───────────────────────────────────────────────────────────
 
 function showView(name) {
-  document.querySelectorAll('.view').forEach(v => v.classList.toggle('hidden', v.id !== `view-${name}`));
+  document.querySelectorAll('.view').forEach(v =>
+    v.classList.toggle('hidden', v.id !== `view-${name}`)
+  );
 }
 
 // ── Lobby UI ──────────────────────────────────────────────────────────────────
@@ -86,8 +92,8 @@ function getPlayerName() {
 
 function bindNetworkEvents() {
   net
-    .on('room-created', onRoomCreated)
-    .on('room-joined',  onRoomJoined)
+    .on('room-created',  onRoomCreated)
+    .on('room-joined',   onRoomJoined)
     .on('player-joined', onPlayerJoined)
     .on('player-left',   onPlayerLeft)
     .on('host-changed',  onHostChanged)
@@ -95,7 +101,7 @@ function bindNetworkEvents() {
     .on('rematch',       onRematch)
     .on('input',         onRemoteInput)
     .on('chat',          onChat)
-    .on('error',         msg => {
+    .on('error', msg => {
       showStatus('lobby', msg.message, true);
       el('createRoomBtn').disabled = false;
       el('joinRoomBtn').disabled = false;
@@ -135,18 +141,33 @@ function onHostChanged(msg) {
   addChatLine('system', 'Host transferred.');
 }
 
-function onGameStarted(msg) {
-  // msg: { playerOrder: string[], seed: number }
+async function onGameStarted(msg) {
+  // msg: { playerOrder, seed, gameType: 'pong'|'nes', romUrl?: string }
   el('preGamePanel').classList.add('hidden');
   el('gamePanel').classList.remove('hidden');
-  startGame(msg.playerOrder, msg.seed);
+  el('loadingOverlay').classList.remove('hidden');
+  el('loadingOverlay').textContent = 'Loading…';
+
+  try {
+    if (msg.gameType === 'nes') {
+      await startNESGame(msg.playerOrder, msg.seed, msg.romUrl);
+    } else {
+      startPongGame(msg.playerOrder, msg.seed);
+    }
+    el('loadingOverlay').classList.add('hidden');
+  } catch (err) {
+    el('loadingOverlay').textContent = `Error: ${err.message}`;
+    el('loadingOverlay').classList.add('error');
+    console.error('[game-start]', err);
+  }
 }
 
 function onRematch() {
-  // Stop current game, return to waiting state
   stopGame();
   el('preGamePanel').classList.remove('hidden');
   el('gamePanel').classList.add('hidden');
+  el('loadingOverlay').classList.add('hidden');
+  el('loadingOverlay').classList.remove('error');
   updateHostControls();
   addChatLine('system', 'Host started a rematch — waiting for players.');
 }
@@ -167,13 +188,22 @@ function enterRoom() {
   updateRoomInfo();
   updatePlayerList();
   updateHostControls();
+  syncGameTypeUI();
 
-  // Room-level UI bindings (idempotent via flag)
   if (!enterRoom._bound) {
     enterRoom._bound = true;
 
+    // Game-type selector — only the host's choice matters (sent with start-game)
+    el('gameTypeSelect').addEventListener('change', syncGameTypeUI);
+
     el('startGameBtn').addEventListener('click', () => {
-      net.send({ type: 'start-game' });
+      const gameType = el('gameTypeSelect').value;
+      const romUrl   = el('romUrlInput').value.trim();
+      if (gameType === 'nes' && !romUrl) {
+        addChatLine('system', 'Enter a ROM URL before starting.');
+        return;
+      }
+      net.send({ type: 'start-game', gameType, romUrl: romUrl || null });
     });
 
     el('rematchBtn').addEventListener('click', () => {
@@ -199,6 +229,14 @@ function enterRoom() {
   }
 }
 
+function syncGameTypeUI() {
+  const isNES    = el('gameTypeSelect').value === 'nes';
+  const isHost   = roomState?.hostId === roomState?.playerId;
+  el('romUrlRow').classList.toggle('hidden', !isNES);
+  el('gameTypeSelect').disabled = !isHost;
+  el('romUrlInput').disabled    = !isHost;
+}
+
 function updateRoomInfo() {
   el('roomIdDisplay').textContent = roomState.roomId;
 }
@@ -208,12 +246,9 @@ function updatePlayerList() {
   list.innerHTML = '';
   for (const p of roomState.players) {
     const li = document.createElement('li');
-    li.className = 'player-item';
-    if (p.id === roomState.playerId) li.classList.add('self');
+    li.className = 'player-item' + (p.id === roomState.playerId ? ' self' : '');
 
-    const badge = p.id === roomState.hostId
-      ? '<span class="badge host">HOST</span>'
-      : '';
+    const badge  = p.id === roomState.hostId ? '<span class="badge host">HOST</span>' : '';
     const youTag = p.id === roomState.playerId ? ' <span class="badge you">YOU</span>' : '';
 
     li.innerHTML = `<span class="player-name">${escHtml(p.name)}${youTag}</span>${badge}`;
@@ -222,20 +257,72 @@ function updatePlayerList() {
 }
 
 function updateHostControls() {
-  const isHost = roomState.hostId === roomState.playerId;
-  el('startGameBtn').classList.toggle('hidden', !isHost || el('gamePanel').classList.contains('hidden') === false);
-  el('rematchBtn').classList.toggle('hidden', !isHost || el('preGamePanel').classList.contains('hidden'));
+  const isHost       = roomState.hostId === roomState.playerId;
+  const gameVisible  = !el('gamePanel').classList.contains('hidden');
+  el('startGameBtn').classList.toggle('hidden', !isHost || gameVisible);
+  el('rematchBtn').classList.toggle('hidden',   !isHost || !gameVisible);
+  el('gameTypeSelect').disabled = !isHost;
+  el('romUrlInput').disabled    = !isHost;
 }
 
 // ── Game lifecycle ────────────────────────────────────────────────────────────
 
-function startGame(playerOrder, seed) {
-  stopGame(); // clean up any prior game
-
+/**
+ * Start the built-in Pong demo game.
+ */
+function startPongGame(playerOrder, seed) {
+  stopGame();
   const canvas = el('gameCanvas');
-  game = new DemoGame(canvas, playerOrder, seed);
+
+  // Reset canvas to Pong's 800×500 logical size
+  canvas.width  = DemoGame.W;
+  canvas.height = DemoGame.H;
+  canvas.style.removeProperty('width');
+  canvas.style.removeProperty('height');
+
+  game    = new DemoGame(canvas, playerOrder, seed);
   inputMgr = new InputManager();
 
+  _startEngine(playerOrder);
+
+  const idx = playerOrder.indexOf(roomState.playerId);
+  el('playerSlotLabel').textContent = idx >= 0 ? `You are Player ${idx + 1}` : 'Spectating';
+  addChatLine('system', `Pong started! Player ${idx + 1}. ↑↓ or W·S to move.`);
+}
+
+/**
+ * Start the NES emulator with the given ROM URL.
+ * Async — awaits ROM download before starting the engine.
+ */
+async function startNESGame(playerOrder, seed, romUrl) {
+  stopGame();
+
+  if (!romUrl) throw new Error('No ROM URL provided.');
+
+  const canvas = el('gameCanvas');
+
+  // NES native resolution; scale up via CSS (pixelated rendering)
+  canvas.width  = NESAdapter.NES_W;
+  canvas.height = NESAdapter.NES_H;
+  canvas.style.width  = `${NESAdapter.NES_W * 3}px`;
+  canvas.style.height = `${NESAdapter.NES_H * 3}px`;
+
+  el('loadingOverlay').textContent = 'Fetching ROM…';
+  game = new NESAdapter(canvas, playerOrder);
+  await game.loadROM(romUrl);
+
+  el('loadingOverlay').textContent = 'Starting…';
+  inputMgr = new InputManager();
+
+  _startEngine(playerOrder);
+
+  const idx = playerOrder.indexOf(roomState.playerId);
+  el('playerSlotLabel').textContent = idx >= 0 ? `You are Player ${idx + 1}` : 'Spectating';
+  addChatLine('system', `NES game started! You are Player ${idx + 1}. Arrow keys / W·A·S·D · Z=A · X=B · Enter=Start · Shift=Select`);
+}
+
+/** Shared engine wiring used by both game types. */
+function _startEngine(playerOrder) {
   engine = new RollbackEngine({
     emulator:      game,
     localPlayerId: roomState.playerId,
@@ -244,7 +331,6 @@ function startGame(playerOrder, seed) {
     onStats:       updateStatsHUD,
   });
 
-  // Wire local-input send via the network client
   engine._sendInput = (frame, input) => {
     net.send({ type: 'input', frame, input });
   };
@@ -253,18 +339,12 @@ function startGame(playerOrder, seed) {
 
   updateHostControls();
   el('rematchBtn').classList.toggle('hidden', roomState.hostId !== roomState.playerId);
-
-  // Show which player slot you are
-  const idx = playerOrder.indexOf(roomState.playerId);
-  el('playerSlotLabel').textContent = idx >= 0 ? `You are Player ${idx + 1}` : 'Spectating';
-
-  addChatLine('system', `Game started! You are Player ${idx + 1}. ${idx === 0 ? '↑↓ / W·S' : '↑↓ / W·S'} to move.`);
 }
 
 function stopGame() {
   engine?.stop();
   engine = null;
-  game = null;
+  game   = null;
   inputMgr?.destroy();
   inputMgr = null;
   clearStatsHUD();
@@ -273,14 +353,14 @@ function stopGame() {
 // ── HUD ───────────────────────────────────────────────────────────────────────
 
 function updateStatsHUD(stats) {
-  el('hudFrame').textContent      = stats.frame;
-  el('hudConfirmed').textContent  = stats.confirmedFrame;
-  el('hudRollbacks').textContent  = stats.rollbacks;
-  el('hudMaxDepth').textContent   = stats.maxRollbackDepth;
+  el('hudFrame').textContent     = stats.frame;
+  el('hudConfirmed').textContent = stats.confirmedFrame;
+  el('hudRollbacks').textContent = stats.rollbacks;
+  el('hudMaxDepth').textContent  = stats.maxRollbackDepth;
 }
 
 function clearStatsHUD() {
-  ['hudFrame','hudConfirmed','hudRollbacks','hudMaxDepth'].forEach(id => {
+  ['hudFrame', 'hudConfirmed', 'hudRollbacks', 'hudMaxDepth'].forEach(id => {
     el(id).textContent = '—';
   });
 }
@@ -312,10 +392,8 @@ function el(id) { return document.getElementById(id); }
 
 function escHtml(str) {
   return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
 function showStatus(view, msg, isError = false) {

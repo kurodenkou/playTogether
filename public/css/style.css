@@ -77,6 +77,37 @@ input[type="text"] {
 input[type="text"]:focus { border-color: var(--accent); }
 input[type="text"]::placeholder { color: var(--text-dim); }
 
+/* ── Select ────────────────────────────────────────────────────────────────── */
+select {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  outline: none;
+  width: 100%;
+  cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%235a5a7a'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 28px;
+  transition: border-color 0.15s;
+}
+select:focus { border-color: var(--accent); }
+select:disabled { opacity: 0.4; cursor: default; }
+
+/* ── Field hint ────────────────────────────────────────────────────────────── */
+.field-hint {
+  display: block;
+  font-size: 10px;
+  color: var(--text-dim);
+  margin-top: 4px;
+  line-height: 1.4;
+}
+
 /* ── Status messages ───────────────────────────────────────────────────────── */
 .status {
   padding: 8px 12px;
@@ -262,7 +293,24 @@ input[type="text"]::placeholder { color: var(--text-dim); }
   border: 1px solid var(--border);
   border-radius: 4px;
   image-rendering: pixelated;
+  image-rendering: crisp-edges; /* Firefox */
 }
+
+/* ── Loading overlay (shown while ROM downloads / engine initialises) ──────── */
+.loading-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(9,9,15,0.88);
+  color: var(--text);
+  font-size: 16px;
+  letter-spacing: 0.05em;
+  border-radius: 4px;
+  z-index: 10;
+}
+.loading-overlay.error { color: var(--accent2); }
 
 /* Pre-game panel (shown before game starts) */
 #preGamePanel {
