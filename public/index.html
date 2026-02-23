@@ -73,7 +73,8 @@
           <div class="controls-hint">
             <strong>Pong</strong> — ↑↓ / W·S to move · first to 7 wins<br>
             <strong>NES</strong> &nbsp;— Arrows/WASD · Z=A · X=B · Enter=Start · Shift=Select<br>
-            <strong>Gamepad</strong> — D-pad/stick · A=A · B/X=B · Start · Select
+            <strong>SNES</strong> — Arrows/WASD · Z=A · X=B · C=X · V=Y · Q=L · E=R · Enter=Start · Shift=Select<br>
+            <strong>Gamepad</strong> — D-pad/stick · A=A · B=B · X=X · Y=Y · LB=L · RB=R · Start · Select
           </div>
         </div>
 
@@ -114,11 +115,12 @@
           <select id="gameTypeSelect">
             <option value="pong">Pong (built-in demo)</option>
             <option value="nes">NES emulator</option>
+            <option value="snes">SNES emulator</option>
           </select>
         </div>
 
         <div id="romUrlRow" class="field-group hidden" style="margin-bottom:10px;">
-          <label for="romUrlInput">ROM URL (.nes)</label>
+          <label for="romUrlInput" id="romUrlLabel">ROM URL (.nes)</label>
           <input type="text" id="romUrlInput" placeholder="https://example.com/game.nes"
                  autocomplete="off" spellcheck="false">
           <span class="field-hint">The URL is fetched server-side (no CORS issues).</span>
@@ -147,10 +149,13 @@
 <!-- ── Scripts ────────────────────────────────────────────────────────────── -->
 <!-- jsnes browser bundle (served from node_modules by the server) -->
 <script src="/js/jsnes.js"></script>
+<!-- snes9x browser bundle (snes9x2005-wasm + snineX helpers, served by server) -->
+<script src="/js/snes9x.js"></script>
 <!-- Platform scripts (load order: dependencies before dependents) -->
 <script src="js/rollback.js"></script>
 <script src="js/demo-game.js"></script>
 <script src="js/nes-adapter.js"></script>
+<script src="js/snes-adapter.js"></script>
 <script src="js/network.js"></script>
 <script src="js/input.js"></script>
 <script src="js/app.js"></script>

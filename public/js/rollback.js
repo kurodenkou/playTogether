@@ -265,13 +265,20 @@ class RollbackEngine {
 }
 
 // ── Input bit-field constants (shared by engine, game, and UI) ────────────────
+// Bits 0-7 are shared by all game types (NES, SNES, Pong).
+// Bits 8-11 are SNES-only (X, Y, L, R shoulder buttons).
 const InputBits = Object.freeze({
-  UP:     0b00000001,
-  DOWN:   0b00000010,
-  LEFT:   0b00000100,
-  RIGHT:  0b00001000,
-  A:      0b00010000,  // Primary action
-  B:      0b00100000,  // Secondary action
-  START:  0b01000000,
-  SELECT: 0b10000000,
+  UP:     0b000000000001,
+  DOWN:   0b000000000010,
+  LEFT:   0b000000000100,
+  RIGHT:  0b000000001000,
+  A:      0b000000010000,  // Primary action
+  B:      0b000000100000,  // Secondary action
+  START:  0b000001000000,
+  SELECT: 0b000010000000,
+  // SNES extra face/shoulder buttons
+  X:      0b000100000000,
+  Y:      0b001000000000,
+  L:      0b010000000000,
+  R:      0b100000000000,
 });

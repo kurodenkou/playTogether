@@ -24,6 +24,13 @@ app.get('/js/jsnes.js', (_req, res) =>
   res.sendFile(path.join(__dirname, 'node_modules', 'jsnes', 'dist', 'jsnes.js'))
 );
 
+// ── Serve the snes9x browser bundle ───────────────────────────────────────────
+// snes9x.js is a patched copy of lrusso/SuperNintendo (snes9x2005-wasm/Emscripten
+// build) augmented with window.snineX low-level helpers for rollback-netcode control.
+app.get('/js/snes9x.js', (_req, res) =>
+  res.sendFile(path.join(__dirname, 'public', 'js', 'snes9x.js'))
+);
+
 // ── ROM proxy ──────────────────────────────────────────────────────────────────
 // Fetches a .nes ROM from an arbitrary URL and relays the bytes to the browser.
 // This avoids CORS issues when the ROM host doesn't set permissive headers.
@@ -217,10 +224,11 @@ wss.on('connection', (ws) => {
         const seed = Date.now() & 0x7fffffff;
 
         // Validate gameType
-        const gameType = msg.gameType === 'nes' ? 'nes' : 'pong';
+        const VALID_GAME_TYPES = new Set(['pong', 'nes', 'snes']);
+        const gameType = VALID_GAME_TYPES.has(msg.gameType) ? msg.gameType : 'pong';
 
-        // Only relay romUrl for NES mode; strip for pong to avoid unexpected data
-        const romUrl = gameType === 'nes'
+        // Only relay romUrl for emulator modes; strip for pong to avoid unexpected data
+        const romUrl = (gameType === 'nes' || gameType === 'snes')
           ? (typeof msg.romUrl === 'string' ? msg.romUrl.slice(0, 2048) : null)
           : null;
 
