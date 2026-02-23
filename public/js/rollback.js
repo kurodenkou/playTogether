@@ -215,12 +215,17 @@ class RollbackEngine {
     const depth = this.frame - toFrame;
     this.emulator.loadState(this.stateHistory.get(toFrame));
 
+    // Suppress audio during re-simulation — only the final (authoritative) frame
+    // should produce sound.  The optional-chaining (?.) keeps this compatible with
+    // emulators that don't implement setAudioMuted (e.g. DemoGame/Pong).
+    this.emulator.setAudioMuted?.(true);
     for (let f = toFrame; f < this.frame; f++) {
       this.stateHistory.set(f, this.emulator.saveState());
       const inputs = this._gatherInputs(f);
       this.usedInputs.set(f, inputs);
       this.emulator.step(inputs);
     }
+    this.emulator.setAudioMuted?.(false);
 
     this._stats.rollbacks++;
     this._stats.maxRollbackDepth = Math.max(this._stats.maxRollbackDepth, depth);
