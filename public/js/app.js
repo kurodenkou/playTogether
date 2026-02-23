@@ -142,14 +142,16 @@ function onHostChanged(msg) {
 }
 
 async function onGameStarted(msg) {
-  // msg: { playerOrder, seed, gameType: 'pong'|'nes', romUrl?: string }
+  // msg: { playerOrder, seed, gameType: 'pong'|'nes'|'snes', romUrl?: string }
   el('preGamePanel').classList.add('hidden');
   el('gamePanel').classList.remove('hidden');
   el('loadingOverlay').classList.remove('hidden');
   el('loadingOverlay').textContent = 'Loading…';
 
   try {
-    if (msg.gameType === 'nes') {
+    if (msg.gameType === 'snes') {
+      await startSNESGame(msg.playerOrder, msg.seed, msg.romUrl);
+    } else if (msg.gameType === 'nes') {
       await startNESGame(msg.playerOrder, msg.seed, msg.romUrl);
     } else {
       startPongGame(msg.playerOrder, msg.seed);
@@ -199,7 +201,7 @@ function enterRoom() {
     el('startGameBtn').addEventListener('click', () => {
       const gameType = el('gameTypeSelect').value;
       const romUrl   = el('romUrlInput').value.trim();
-      if (gameType === 'nes' && !romUrl) {
+      if ((gameType === 'nes' || gameType === 'snes') && !romUrl) {
         addChatLine('system', 'Enter a ROM URL before starting.');
         return;
       }
@@ -230,9 +232,14 @@ function enterRoom() {
 }
 
 function syncGameTypeUI() {
-  const isNES    = el('gameTypeSelect').value === 'nes';
+  const gameType = el('gameTypeSelect').value;
+  const needsRom = gameType === 'nes' || gameType === 'snes';
   const isHost   = roomState?.hostId === roomState?.playerId;
-  el('romUrlRow').classList.toggle('hidden', !isNES);
+  el('romUrlRow').classList.toggle('hidden', !needsRom);
+  el('romUrlLabel').textContent = gameType === 'snes' ? 'ROM URL (.sfc / .smc)' : 'ROM URL (.nes)';
+  el('romUrlInput').placeholder  = gameType === 'snes'
+    ? 'https://example.com/game.sfc'
+    : 'https://example.com/game.nes';
   el('gameTypeSelect').disabled = !isHost;
   el('romUrlInput').disabled    = !isHost;
 }
@@ -291,6 +298,37 @@ function startPongGame(playerOrder, seed) {
 }
 
 /**
+ * Start the SNES emulator with the given ROM URL.
+ * Async — awaits ROM download before starting the engine.
+ */
+async function startSNESGame(playerOrder, seed, romUrl) {
+  stopGame();
+
+  if (!romUrl) throw new Error('No ROM URL provided.');
+
+  const canvas = el('gameCanvas');
+
+  // SNES native resolution 512×448; scale up via CSS (pixelated rendering)
+  canvas.width  = SNESAdapter.SNES_W;
+  canvas.height = SNESAdapter.SNES_H;
+  canvas.style.width  = `${SNESAdapter.SNES_W * 2}px`;
+  canvas.style.height = `${SNESAdapter.SNES_H * 2}px`;
+
+  el('loadingOverlay').textContent = 'Fetching ROM…';
+  game = new SNESAdapter(canvas, playerOrder);
+  await game.loadROM(romUrl);
+
+  el('loadingOverlay').textContent = 'Starting…';
+  inputMgr = new InputManager();
+
+  _startEngine(playerOrder);
+
+  const idx = playerOrder.indexOf(roomState.playerId);
+  el('playerSlotLabel').textContent = idx >= 0 ? `You are Player ${idx + 1}` : 'Spectating';
+  addChatLine('system', `SNES game started! You are Player ${idx + 1}. Arrows/WASD · Z=A · X=B · C=X · V=Y · Q=L · E=R · Enter=Start`);
+}
+
+/**
  * Start the NES emulator with the given ROM URL.
  * Async — awaits ROM download before starting the engine.
  */
@@ -344,6 +382,7 @@ function _startEngine(playerOrder) {
 function stopGame() {
   engine?.stop();
   engine = null;
+  game?.stopAudio?.();
   game   = null;
   inputMgr?.destroy();
   inputMgr = null;
