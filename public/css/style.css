@@ -257,6 +257,15 @@ select:disabled { opacity: 0.4; cursor: default; }
   color: var(--text-dim);
 }
 
+.gamepad-indicator {
+  font-size: 11px;
+  color: var(--accent);
+  background: rgba(99,102,241,0.15);
+  border: 1px solid rgba(99,102,241,0.35);
+  border-radius: 4px;
+  padding: 2px 7px;
+}
+
 /* ── Main layout ─────────────────────────────────────────────────────────── */
 .room-body {
   display: flex;
