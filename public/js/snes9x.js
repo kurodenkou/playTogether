@@ -4,7 +4,7 @@ var _audioCtx=null,_sp=null;
 var _aL=new Float32Array(8192),_aR=new Float32Array(8192);
 var _aW=0,_aRd=0,_aMask=8191,_aMuted=false;
 r.window.snineX={
-isReady:function(){return !!(t&&t._mainLoop);},
+isReady:function(){return !!(t&&t._mainLoop&&t.HEAPU8);},
 initAudio:function(){
   _audioCtx=new(r.window.AudioContext||r.window.webkitAudioContext)();
   _sp=_audioCtx.createScriptProcessor(512,0,2);
