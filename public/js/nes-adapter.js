@@ -67,16 +67,90 @@ class NESAdapter {
     this._skipPtTile  = false; // true for CHR ROM games (tiles immutable after loadROM)
     this._btnMap      = null;
 
+    // ── Audio ─────────────────────────────────────────────────────────────────
+    // Ring buffer (power-of-2 size for fast modulo via bitwise AND).
+    // 8192 samples @ 44100 Hz ≈ 185 ms of buffer — enough headroom for rollbacks
+    // up to 8 frames deep without audible glitches.
+    this._AUDIO_COUNT = 8192;
+    this._AUDIO_MASK  = this._AUDIO_COUNT - 1;
+    this._audioL      = new Float32Array(this._AUDIO_COUNT);
+    this._audioR      = new Float32Array(this._AUDIO_COUNT);
+    this._audioWrite  = 0;
+    this._audioRead   = 0;
+    this._audioMuted  = false;
+
+    // AudioContext — may auto-suspend until the user interacts (browser autoplay policy).
+    // We lazily resume it on the first step() call after a key press.
+    this._audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
     this.nes = new jsnes.NES({
       onFrame: (buf) => {
         this._frameBuffer = buf;
         this._dirty = true;
       },
-      onAudioSample: () => {
-        // Audio intentionally omitted — implementing rollback-safe audio requires
-        // a timestamped sample queue and separate audio worklet.
+      // Buffer stereo samples into the ring buffer.
+      // onAudioSample is called at the NES APU rate (≈ audioCtx.sampleRate).
+      onAudioSample: (l, r) => {
+        if (this._audioMuted) return;
+        this._audioL[this._audioWrite] = l;
+        this._audioR[this._audioWrite] = r;
+        this._audioWrite = (this._audioWrite + 1) & this._AUDIO_MASK;
       },
+      sampleRate: this._audioCtx.sampleRate,
     });
+
+    this._setupScriptProcessor();
+  }
+
+  _setupScriptProcessor() {
+    // ScriptProcessorNode with 512-sample buffers, 0 inputs, 2 output channels.
+    // Runs on the main thread but is scheduled by the audio thread — keeps latency low.
+    const sp = this._audioCtx.createScriptProcessor(512, 0, 2);
+
+    sp.onaudioprocess = (event) => {
+      const dstL = event.outputBuffer.getChannelData(0);
+      const dstR = event.outputBuffer.getChannelData(1);
+      const len  = dstL.length;
+
+      const available = (this._audioWrite - this._audioRead) & this._AUDIO_MASK;
+      const toRead    = Math.min(len, available);
+
+      // Drain ring buffer
+      for (let i = 0; i < toRead; i++) {
+        const idx  = (this._audioRead + i) & this._AUDIO_MASK;
+        dstL[i] = this._audioL[idx];
+        dstR[i] = this._audioR[idx];
+      }
+      // Silence for any underrun (buffer was empty)
+      for (let i = toRead; i < len; i++) {
+        dstL[i] = 0;
+        dstR[i] = 0;
+      }
+
+      this._audioRead = (this._audioRead + toRead) & this._AUDIO_MASK;
+    };
+
+    sp.connect(this._audioCtx.destination);
+    this._scriptProcessor = sp;
+  }
+
+  /**
+   * Called by RollbackEngine to suppress audio during re-simulation.
+   * Muted samples are discarded so the player only hears the authoritative frames.
+   * @param {boolean} muted
+   */
+  setAudioMuted(muted) {
+    this._audioMuted = muted;
+  }
+
+  stopAudio() {
+    if (this._scriptProcessor) {
+      this._scriptProcessor.disconnect();
+      this._scriptProcessor = null;
+    }
+    if (this._audioCtx && this._audioCtx.state !== 'closed') {
+      this._audioCtx.close();
+    }
   }
 
   // ── ROM loading ──────────────────────────────────────────────────────────
@@ -128,6 +202,13 @@ class NESAdapter {
    */
   step(inputMap) {
     if (!this._romLoaded) return;
+
+    // Lazily resume AudioContext — browser autoplay policy suspends it until
+    // the user interacts. step() is called every frame; the first call after
+    // a key/click event will succeed and audio starts within one frame.
+    if (this._audioCtx.state === 'suspended') {
+      this._audioCtx.resume();
+    }
 
     for (let i = 0; i < 2; i++) {
       const pid   = this.playerIds[i];
