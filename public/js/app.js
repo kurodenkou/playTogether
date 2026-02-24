@@ -308,11 +308,11 @@ async function startSNESGame(playerOrder, seed, romUrl) {
 
   const canvas = el('gameCanvas');
 
-  // SNES native resolution 512×448; scale up via CSS (pixelated rendering)
+  // SNES native resolution 256×224; scale up 3× via CSS (pixelated rendering)
   canvas.width  = SNESAdapter.SNES_W;
   canvas.height = SNESAdapter.SNES_H;
-  canvas.style.width  = `${SNESAdapter.SNES_W * 2}px`;
-  canvas.style.height = `${SNESAdapter.SNES_H * 2}px`;
+  canvas.style.width  = `${SNESAdapter.SNES_W * 3}px`;
+  canvas.style.height = `${SNESAdapter.SNES_H * 3}px`;
 
   el('loadingOverlay').textContent = 'Fetching ROM…';
   game = new SNESAdapter(canvas, playerOrder);
