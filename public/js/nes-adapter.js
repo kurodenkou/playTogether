@@ -130,7 +130,10 @@ class NESAdapter {
       this._audioRead = (this._audioRead + toRead) & this._AUDIO_MASK;
     };
 
-    sp.connect(this._audioCtx.destination);
+    const gain = this._audioCtx.createGain();
+    gain.gain.value = 0.5;
+    sp.connect(gain);
+    gain.connect(this._audioCtx.destination);
     this._scriptProcessor = sp;
   }
 

@@ -115,7 +115,10 @@ class SNESAdapter {
         'snes-audio-processor',
         { numberOfOutputs: 1, outputChannelCount: [2] }
       );
-      this._workletNode.connect(this._audioCtx.destination);
+      const gain = this._audioCtx.createGain();
+      gain.gain.value = 0.5;
+      this._workletNode.connect(gain);
+      gain.connect(this._audioCtx.destination);
       // Pre-fill the ring buffer with 2 frames of silence before the game loop
       // starts.  Without this the buffer starts empty and any tiny main-thread
       // hiccup (a late rAF tick) causes an immediate underflow click.  Two
