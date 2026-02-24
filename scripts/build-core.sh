@@ -107,6 +107,22 @@ CORE_NAME[fbalpha2012_cps1]="FB Alpha 2012 CPS-1 (Arcade)"
 CORE_SYSTEM[fbalpha2012_cps1]="arcade"
 CORE_BUILD[fbalpha2012_cps1]="make"
 
+# ── Per-core Makefile overrides ────────────────────────────────────────────────
+# CORE_MAKEDIR: subdirectory within the cloned repo that contains the Makefile.
+#               Empty = repo root (the default for most cores).
+declare -A CORE_MAKEDIR
+CORE_MAKEDIR[nestopia]="libretro"          # libretro port lives in libretro/
+CORE_MAKEDIR[gearboy]="platforms/libretro" # libretro port lives in platforms/libretro/
+
+# CORE_MAKEFILE: Makefile filename to pass to -f.
+#                Default is "Makefile"; override for cores that use Makefile.libretro.
+declare -A CORE_MAKEFILE
+CORE_MAKEFILE[fceumm]="Makefile.libretro"
+CORE_MAKEFILE[gambatte]="Makefile.libretro"
+CORE_MAKEFILE[genesis_plus_gx]="Makefile.libretro"
+CORE_MAKEFILE[picodrive]="Makefile.libretro"
+CORE_MAKEFILE[fbalpha2012_cps1]="makefile.libretro"  # note lowercase 'm'
+
 # ── emcc exported functions (standard libretro C API + allocator) ──────────────
 EXPORTED_FN='["_retro_init","_retro_deinit","_retro_get_system_info","_retro_get_system_av_info","_retro_set_environment","_retro_set_video_refresh","_retro_set_input_poll","_retro_set_input_state","_retro_set_audio_sample","_retro_set_audio_sample_batch","_retro_reset","_retro_run","_retro_serialize_size","_retro_serialize","_retro_unserialize","_retro_load_game","_retro_unload_game","_malloc","_free"]'
 
@@ -159,9 +175,9 @@ fetch_source() {
 
 find_library() {
     local src="$1"
-    # Search common locations; most cores put the archive in the root or a build/ dir.
+    # depth 5 covers repos with nested Makefile dirs (platforms/libretro/, etc.)
     local f
-    f=$(find "$src" -maxdepth 3 \
+    f=$(find "$src" -maxdepth 5 \
         \( -name "*_libretro*.bc" -o -name "*_libretro*.a" \
            -o -name "*_libretro_emscripten*.bc" -o -name "*_libretro_emscripten*.a" \) \
         -not -path "*/node_modules/*" \
@@ -175,10 +191,15 @@ build_make() {
     local id="$1"
     local src="$SRC_DIR/$id"
 
-    info "Building $id with emmake…"
-    # Clean any prior build artifacts so the Makefile reruns cleanly.
-    emmake make -C "$src" -f Makefile platform=emscripten clean 2>/dev/null || true
-    emmake make -C "$src" -f Makefile platform=emscripten -j"$(nproc 2>/dev/null || echo 4)"
+    # Resolve which subdirectory and Makefile filename to use for this core.
+    local subdir="${CORE_MAKEDIR[$id]:-}"
+    local makefile="${CORE_MAKEFILE[$id]:-Makefile}"
+    local builddir="$src${subdir:+/$subdir}"
+
+    info "Building $id with emmake (${subdir:-.}/$makefile)…"
+    # Clean prior artifacts so the Makefile runs from scratch.
+    emmake make -C "$builddir" -f "$makefile" platform=emscripten clean 2>/dev/null || true
+    emmake make -C "$builddir" -f "$makefile" platform=emscripten -j"$(nproc 2>/dev/null || echo 4)"
 }
 
 # ── Build mGBA (CMake-based) ───────────────────────────────────────────────────
