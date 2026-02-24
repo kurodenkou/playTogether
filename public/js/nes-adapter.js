@@ -69,9 +69,9 @@ class NESAdapter {
 
     // ── Audio ─────────────────────────────────────────────────────────────────
     // Ring buffer (power-of-2 size for fast modulo via bitwise AND).
-    // 8192 samples @ 44100 Hz ≈ 185 ms of buffer — enough headroom for rollbacks
-    // up to 8 frames deep without audible glitches.
-    this._AUDIO_COUNT = 8192;
+    // 4096 samples @ 44100 Hz ≈ 93 ms of buffer — enough headroom for rollbacks
+    // up to 4 frames deep without audible glitches.
+    this._AUDIO_COUNT = 4096;
     this._AUDIO_MASK  = this._AUDIO_COUNT - 1;
     this._audioL      = new Float32Array(this._AUDIO_COUNT);
     this._audioR      = new Float32Array(this._AUDIO_COUNT);

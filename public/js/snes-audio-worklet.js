@@ -18,9 +18,9 @@ class SNESAudioProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
 
-    // Ring buffer: 8192 stereo frames ≈ 136 ms at 60 fps (735 samples/frame).
+    // Ring buffer: 4096 stereo frames ≈ 68 ms at 60 fps (735 samples/frame).
     // Large enough to absorb scheduling jitter without audible latency.
-    this._size = 8192;
+    this._size = 4096;
     this._mask = this._size - 1;
     this._bufL = new Float32Array(this._size);
     this._bufR = new Float32Array(this._size);
