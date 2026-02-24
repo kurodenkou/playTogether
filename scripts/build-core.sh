@@ -100,7 +100,7 @@ CORE_BUILD[beetle_pce_fast]="make"
 CORE_REPO[gearboy]="https://github.com/libretro/gearboy.git"
 CORE_NAME[gearboy]="Gearboy (GB / GBC)"
 CORE_SYSTEM[gearboy]="gb"
-CORE_BUILD[gearboy]="make"
+CORE_BUILD[gearboy]="gearboy"
 
 CORE_REPO[fbalpha2012_cps1]="https://github.com/libretro/fbalpha2012_cps1.git"
 CORE_NAME[fbalpha2012_cps1]="FB Alpha 2012 CPS-1 (Arcade)"
@@ -263,29 +263,38 @@ JSON
     ok "       public/cores/$id/core.wasm ($(du -sh "$out/core.wasm" | cut -f1))"
 }
 
-# ── Per-core source patches ────────────────────────────────────────────────────
-# Applied after fetch_source and before the build step.
-# Use minimal sed patches for cores whose upstream Makefiles have
-# Emscripten-version-specific issues.
+# ── Build gearboy (Emscripten 3.x compat) ─────────────────────────────────────
+# Gearboy's platforms/libretro/Makefile links with `em++ --relocatable` to
+# produce a .bc side-module.  Newer wasm-ld rejects --relocatable entirely.
+#
+# Workaround: run emmake as usual — the per-file compile rules (*.cpp → *.o)
+# succeed; we suppress the final link failure with `|| true`.  Then we use
+# `emar` to pack all the resulting WASM object files into a static archive,
+# which the final `link_core` emcc step accepts normally.
 
-apply_patches() {
-    local id="$1"
-    local src="$SRC_DIR/$id"
+build_gearboy() {
+    local src="$SRC_DIR/gearboy"
+    local builddir="$src/platforms/libretro"
+    local archive="$builddir/gearboy_libretro_emscripten.a"
 
-    case "$id" in
-        gearboy)
-            local mf="$src/platforms/libretro/Makefile"
-            if [[ -f "$mf" ]]; then
-                info "Patching gearboy Makefile (drop --relocatable for newer wasm-ld)…"
-                # Older gearboy Makefiles pass --relocatable to wasm-ld to produce a
-                # .bc side-module; newer wasm-ld rejects this flag entirely.
-                # Strip the flag and rename the output to .a (LLVM static archive),
-                # which Emscripten ≥ 3.x accepts as an input to the final emcc link.
-                sed -i 's/ --relocatable//g' "$mf"
-                sed -i 's/gearboy_libretro_emscripten\.bc/gearboy_libretro_emscripten.a/g' "$mf"
-            fi
-            ;;
-    esac
+    info "Building gearboy: emmake (compile phase) + emar archive…"
+    emmake make -C "$builddir" platform=emscripten clean 2>/dev/null || true
+
+    # The link step will fail (--relocatable not supported by wasm-ld ≥ 3.x);
+    # that is expected.  Individual .cpp → .o compilation should succeed.
+    emmake make -C "$builddir" platform=emscripten \
+        -j"$(nproc 2>/dev/null || echo 4)" 2>&1 || true
+
+    # Gather all WASM object files produced under the source tree.
+    local objects
+    mapfile -t objects < <(find "$src" -name "*.o" \
+        -not -path "*/node_modules/*" | sort)
+    [[ ${#objects[@]} -gt 0 ]] || \
+        die "gearboy: no .o files found — did the compilation step fail?"
+
+    info "Archiving ${#objects[@]} gearboy object(s) with emar…"
+    emar rcs "$archive" "${objects[@]}"
+    [[ -f "$archive" ]] || die "gearboy: emar archive step failed"
 }
 
 # ── Compile one core end-to-end ────────────────────────────────────────────────
@@ -295,7 +304,6 @@ build_core() {
     [[ -v CORE_REPO[$id] ]] || die "Unknown core: '$id'. Run --list to see options."
 
     fetch_source "$id"
-    apply_patches "$id"
 
     case "${CORE_BUILD[$id]}" in
         cmake)
@@ -303,6 +311,9 @@ build_core() {
                 mgba) build_cmake_mgba ;;
                 *)    die "No cmake build handler for '$id'" ;;
             esac
+            ;;
+        gearboy)
+            build_gearboy
             ;;
         *)
             build_make "$id"
