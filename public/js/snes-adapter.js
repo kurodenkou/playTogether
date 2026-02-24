@@ -1,5 +1,5 @@
 /**
- * SNESAdapter — snes9x2005-wasm wrapper implementing the RollbackEngine emulator contract
+ * SNESAdapter — snes9x2005-wasm wrapper implementing the RollbackEngine emulator contract.
  *
  * Emulator contract:
  *   step(inputMap)   — advance one SNES frame with given inputs
@@ -7,20 +7,24 @@
  *   loadState(snap)  — restore from snapshot
  *   render()         — blit current frame to canvas
  *
- * This adapter sits on top of window.snineX, a low-level helper object
- * injected into snes9x.js (a patched build of lrusso/SuperNintendo, which
- * itself is snes9x2005 compiled to WebAssembly via Emscripten).
+ * Audio is handled entirely by this adapter via AudioWorklet (snes-audio-worklet.js).
+ * After each step(), window.snineX.getAudioSamples() returns an interleaved stereo
+ * Float32Array for that frame; the adapter posts it (with buffer transfer) to the
+ * AudioWorkletNode running on the dedicated audio thread.  This replaces the old
+ * ScriptProcessorNode approach, which ran on the main thread and caused ring-buffer
+ * overflows and choppy audio under load.
  *
  * SNES display canvas: 256 × 224 pixels (native SNES resolution).
- * WASM screen buffer: 512 × 448 RGBA (917 504 bytes) — game pixels occupy
- * only the top-left 256 × 224 region; putImageData clips the rest.
+ * WASM screen buffer:  512 × 448 RGBA (917 504 bytes) — game pixels occupy only the
+ *   top-left 256 × 224 region; putImageData clips the rest.
+ *
  * JOYPAD bit encoding (snes9x register format):
  *   B=0x8000  Y=0x4000  SELECT=0x2000  START=0x1000
  *   UP=0x0800 DOWN=0x0400 LEFT=0x0200 RIGHT=0x0100
  *   A=0x0080  X=0x0040  L=0x0020     R=0x0010
  *
  * Input mapping (InputBits → SNES joypad):
- *   UP / DOWN / LEFT / RIGHT / START / SELECT  — same semantics as NES
+ *   UP / DOWN / LEFT / RIGHT / START / SELECT — same semantics as NES
  *   A   → SNES A  (primary)
  *   B   → SNES B  (secondary)
  *   X   → SNES X  (InputBits.X)
@@ -57,11 +61,13 @@ class SNESAdapter {
     // top-left 256×224 pixels — where the emulator places the game — are shown.
     this._imageData = this.ctx.createImageData(SNESAdapter.SCREEN_BUF_W, SNESAdapter.SCREEN_BUF_H);
 
-    this._romLoaded = false;
-    this._audioMuted = false;
+    this._romLoaded   = false;
+    this._audioMuted  = false;
+    this._audioCtx    = null;
+    this._workletNode = null;
   }
 
-  // ── ROM loading ──────────────────────────────────────────────────────────
+  // ── ROM loading ───────────────────────────────────────────────────────────
 
   /**
    * Fetch the SNES ROM via the server-side proxy and load it into snes9x.
@@ -82,21 +88,32 @@ class SNESAdapter {
     // Wait for WASM to be ready (snes9x.js initialises asynchronously)
     await this._waitForWasm();
 
-    window.snineX.initAudio();
-    window.snineX.start(buf, this._audioCtxSampleRate());
+    // Set up the AudioWorklet before starting the emulator so the sample
+    // rate is known and audio is ready to receive the first frame's samples.
+    await this._initAudio();
+
+    const sampleRate = this._audioCtx?.sampleRate ?? 44100;
+    window.snineX.start(buf, sampleRate);
 
     this._romLoaded = true;
   }
 
-  /** Returns a sample rate hint for snes9x (falls back to 36 kHz). */
-  _audioCtxSampleRate() {
+  // ── Audio setup ───────────────────────────────────────────────────────────
+
+  /**
+   * Create an AudioContext and register the SNESAudioProcessor worklet.
+   * Falls back gracefully (audio disabled) if AudioWorklet is unavailable.
+   */
+  async _initAudio() {
     try {
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      const sr  = ctx.sampleRate;
-      ctx.close();
-      return sr;
-    } catch {
-      return 36000;
+      this._audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      await this._audioCtx.audioWorklet.addModule('/js/snes-audio-worklet.js');
+      this._workletNode = new AudioWorkletNode(this._audioCtx, 'snes-audio-processor');
+      this._workletNode.connect(this._audioCtx.destination);
+    } catch (err) {
+      console.warn('[SNESAdapter] AudioWorklet unavailable, audio disabled:', err.message);
+      this._audioCtx    = null;
+      this._workletNode = null;
     }
   }
 
@@ -105,8 +122,7 @@ class SNESAdapter {
    * snes9x.js initialises its WASM module asynchronously at script load time;
    * by the time loadROM is called the module is almost always ready, but we
    * poll briefly just in case.
-   * Timeout is 10 seconds (200 × 50 ms) to cover slow devices; in practice
-   * the module is ready within milliseconds of the WASM compile finishing.
+   * Timeout is 10 seconds (200 × 50 ms) to cover slow devices.
    */
   _waitForWasm() {
     return new Promise((resolve, reject) => {
@@ -124,11 +140,21 @@ class SNESAdapter {
   /** Called by RollbackEngine to suppress audio during re-simulation. */
   setAudioMuted(muted) {
     this._audioMuted = muted;
-    window.snineX?.setAudioMuted(muted);
+    // Resume the AudioContext on unmute — browsers suspend it until a user gesture.
+    if (!muted && this._audioCtx?.state === 'suspended') {
+      this._audioCtx.resume();
+    }
   }
 
   stopAudio() {
-    window.snineX?.stopAudio();
+    if (this._workletNode) {
+      this._workletNode.disconnect();
+      this._workletNode = null;
+    }
+    if (this._audioCtx && this._audioCtx.state !== 'closed') {
+      this._audioCtx.close();
+      this._audioCtx = null;
+    }
   }
 
   // ── Emulator contract ─────────────────────────────────────────────────────
@@ -144,6 +170,14 @@ class SNESAdapter {
     const j2 = this._toJoypad(inputMap[this.playerIds[1]] ?? 0);
 
     window.snineX.step(j1, j2);
+
+    // Feed audio to the worklet thread, skipping during rollback re-simulation.
+    // Transfer the buffer (zero-copy) rather than cloning it.
+    if (!this._audioMuted && this._workletNode) {
+      if (this._audioCtx?.state === 'suspended') this._audioCtx.resume();
+      const samples = window.snineX.getAudioSamples();
+      if (samples) this._workletNode.port.postMessage({ samples }, [samples.buffer]);
+    }
   }
 
   /**

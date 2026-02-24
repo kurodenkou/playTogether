@@ -27,6 +27,8 @@ app.get('/js/jsnes.js', (_req, res) =>
 // ── Serve the snes9x browser bundle ───────────────────────────────────────────
 // snes9x.js is a patched copy of lrusso/SuperNintendo (snes9x2005-wasm/Emscripten
 // build) augmented with window.snineX low-level helpers for rollback-netcode control.
+// Audio is managed by SNESAdapter via AudioWorklet (public/js/snes-audio-worklet.js),
+// which is served automatically by express.static above.
 app.get('/js/snes9x.js', (_req, res) =>
   res.sendFile(path.join(__dirname, 'public', 'js', 'snes9x.js'))
 );
