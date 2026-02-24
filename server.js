@@ -12,6 +12,7 @@ const http = require('http');
 const WebSocket = require('ws');
 const path = require('path');
 const crypto = require('crypto');
+const fs = require('fs');
 
 const app = express();
 const server = http.createServer(app);
@@ -32,6 +33,41 @@ app.get('/js/jsnes.js', (_req, res) =>
 app.get('/js/snes9x.js', (_req, res) =>
   res.sendFile(path.join(__dirname, 'public', 'js', 'snes9x.js'))
 );
+
+// ── Installed libretro cores ──────────────────────────────────────────────────
+// Lists cores placed in public/cores/<id>/ by scripts/build-core.sh.
+// Each core directory must contain core.js (and optionally core.wasm + core.json).
+// The UI dropdown calls this endpoint to populate the "Installed core" selector.
+
+app.get('/api/cores', (_req, res) => {
+  const coresDir = path.join(__dirname, 'public', 'cores');
+  if (!fs.existsSync(coresDir)) return res.json([]);
+
+  let entries;
+  try { entries = fs.readdirSync(coresDir); } catch { return res.json([]); }
+
+  const cores = entries
+    .filter(name => {
+      const dir = path.join(coresDir, name);
+      return fs.statSync(dir).isDirectory() &&
+             fs.existsSync(path.join(dir, 'core.js'));
+    })
+    .map(name => {
+      const dir = path.join(coresDir, name);
+      let meta = {};
+      try { meta = JSON.parse(fs.readFileSync(path.join(dir, 'core.json'), 'utf8')); } catch {}
+      return {
+        id:      name,
+        name:    meta.name   ?? name,
+        system:  meta.system ?? 'unknown',
+        jsUrl:   `/cores/${name}/core.js`,
+        wasmUrl: fs.existsSync(path.join(dir, 'core.wasm')) ? `/cores/${name}/core.wasm` : null,
+      };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  res.json(cores);
+});
 
 // ── ROM proxy ──────────────────────────────────────────────────────────────────
 // Fetches a .nes/.sfc ROM from an arbitrary URL and relays the bytes to the

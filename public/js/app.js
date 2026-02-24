@@ -31,6 +31,9 @@ let game = null;
 /** @type {InputManager|null} */
 let inputMgr = null;
 
+/** @type {Array|null} cached result from GET /api/cores (null = not yet fetched) */
+let _coresCache = null;
+
 // ── Boot ──────────────────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -199,6 +202,7 @@ function enterRoom() {
 
     // Game-type selector — only the host's choice matters (sent with start-game)
     el('gameTypeSelect').addEventListener('change', syncGameTypeUI);
+    _wireCoreSelect();
 
     el('startGameBtn').addEventListener('click', () => {
       const gameType    = el('gameTypeSelect').value;
@@ -245,6 +249,50 @@ function enterRoom() {
   }
 }
 
+/**
+ * Fetch the list of locally-built cores from GET /api/cores and populate
+ * the #coreSelect dropdown.  Results are cached after the first fetch.
+ * Shows #coreSelectRow only when at least one core is installed.
+ */
+async function _populateCoreSelect() {
+  try {
+    if (_coresCache === null) {
+      const resp = await fetch('/api/cores');
+      _coresCache = resp.ok ? await resp.json() : [];
+    }
+
+    const select = el('coreSelect');
+    // Rebuild options (keep the placeholder at index 0)
+    while (select.options.length > 1) select.remove(1);
+
+    for (const core of _coresCache) {
+      const opt = document.createElement('option');
+      // Store both URLs in the value so auto-fill can read them without a second lookup
+      opt.value       = JSON.stringify({ jsUrl: core.jsUrl, wasmUrl: core.wasmUrl ?? '' });
+      opt.textContent = core.name;
+      select.appendChild(opt);
+    }
+
+    el('coreSelectRow').classList.toggle('hidden', _coresCache.length === 0);
+  } catch {
+    el('coreSelectRow').classList.add('hidden');
+  }
+}
+
+/**
+ * Wire up the #coreSelect → URL-field auto-fill.
+ * Called once inside enterRoom() after the DOM is bound.
+ */
+function _wireCoreSelect() {
+  el('coreSelect').addEventListener('change', () => {
+    const val = el('coreSelect').value;
+    if (!val) return;
+    const { jsUrl, wasmUrl } = JSON.parse(val);
+    el('coreUrlInput').value     = jsUrl;
+    el('coreWasmUrlInput').value = wasmUrl;
+  });
+}
+
 function syncGameTypeUI() {
   const gameType      = el('gameTypeSelect').value;
   const isHost        = roomState?.hostId === roomState?.playerId;
@@ -254,6 +302,12 @@ function syncGameTypeUI() {
   el('coreUrlRow').classList.toggle('hidden', !isRetroarch);
   el('coreWasmUrlRow').classList.toggle('hidden', !isRetroarch);
   el('romUrlRow').classList.toggle('hidden', !isRomEmulator);
+
+  if (isRetroarch) {
+    _populateCoreSelect(); // async; shows #coreSelectRow when cores are available
+  } else {
+    el('coreSelectRow').classList.add('hidden');
+  }
 
   if (gameType === 'snes') {
     el('romUrlLabel').textContent  = 'ROM URL (.sfc / .smc)';
