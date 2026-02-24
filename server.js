@@ -274,12 +274,20 @@ wss.on('connection', (ws) => {
         const seed = Date.now() & 0x7fffffff;
 
         // Validate gameType
-        const VALID_GAME_TYPES = new Set(['pong', 'nes', 'snes']);
+        const VALID_GAME_TYPES = new Set(['pong', 'nes', 'snes', 'retroarch']);
         const gameType = VALID_GAME_TYPES.has(msg.gameType) ? msg.gameType : 'pong';
 
         // Only relay romUrl for emulator modes; strip for pong to avoid unexpected data
-        const romUrl = (gameType === 'nes' || gameType === 'snes')
+        const romUrl = (gameType === 'nes' || gameType === 'snes' || gameType === 'retroarch')
           ? (typeof msg.romUrl === 'string' ? msg.romUrl.slice(0, 2048) : null)
+          : null;
+
+        // Relay the libretro core JS URL for retroarch mode (two optional fields)
+        const coreUrl = gameType === 'retroarch'
+          ? (typeof msg.coreUrl === 'string' ? msg.coreUrl.slice(0, 2048) : null)
+          : null;
+        const coreWasmUrl = gameType === 'retroarch'
+          ? (typeof msg.coreWasmUrl === 'string' ? msg.coreWasmUrl.slice(0, 2048) : null)
           : null;
 
         room.broadcastAll({
@@ -288,6 +296,8 @@ wss.on('connection', (ws) => {
           seed,
           gameType,
           romUrl,
+          coreUrl,
+          coreWasmUrl,
         });
         console.log(`[room] game started in ${room.id} (${gameType}), players: ${room.playerOrder}`);
         break;

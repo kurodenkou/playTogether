@@ -142,7 +142,7 @@ function onHostChanged(msg) {
 }
 
 async function onGameStarted(msg) {
-  // msg: { playerOrder, seed, gameType: 'pong'|'nes'|'snes', romUrl?: string }
+  // msg: { playerOrder, seed, gameType: 'pong'|'nes'|'snes'|'retroarch', romUrl?, coreUrl?, coreWasmUrl? }
   el('preGamePanel').classList.add('hidden');
   el('gamePanel').classList.remove('hidden');
   el('loadingOverlay').classList.remove('hidden');
@@ -153,6 +153,8 @@ async function onGameStarted(msg) {
       await startSNESGame(msg.playerOrder, msg.seed, msg.romUrl);
     } else if (msg.gameType === 'nes') {
       await startNESGame(msg.playerOrder, msg.seed, msg.romUrl);
+    } else if (msg.gameType === 'retroarch') {
+      await startLibretroGame(msg.playerOrder, msg.seed, msg.romUrl, msg.coreUrl, msg.coreWasmUrl);
     } else {
       startPongGame(msg.playerOrder, msg.seed);
     }
@@ -199,13 +201,25 @@ function enterRoom() {
     el('gameTypeSelect').addEventListener('change', syncGameTypeUI);
 
     el('startGameBtn').addEventListener('click', () => {
-      const gameType = el('gameTypeSelect').value;
-      const romUrl   = el('romUrlInput').value.trim();
+      const gameType    = el('gameTypeSelect').value;
+      const romUrl      = el('romUrlInput').value.trim();
+      const coreUrl     = el('coreUrlInput').value.trim();
+      const coreWasmUrl = el('coreWasmUrlInput').value.trim();
       if ((gameType === 'nes' || gameType === 'snes') && !romUrl) {
         addChatLine('system', 'Enter a ROM URL before starting.');
         return;
       }
-      net.send({ type: 'start-game', gameType, romUrl: romUrl || null });
+      if (gameType === 'retroarch') {
+        if (!coreUrl) { addChatLine('system', 'Enter a Core JS URL before starting.'); return; }
+        if (!romUrl)  { addChatLine('system', 'Enter a ROM URL before starting.');     return; }
+      }
+      net.send({
+        type: 'start-game',
+        gameType,
+        romUrl:      romUrl      || null,
+        coreUrl:     coreUrl     || null,
+        coreWasmUrl: coreWasmUrl || null,
+      });
     });
 
     el('rematchBtn').addEventListener('click', () => {
@@ -232,16 +246,30 @@ function enterRoom() {
 }
 
 function syncGameTypeUI() {
-  const gameType = el('gameTypeSelect').value;
-  const needsRom = gameType === 'nes' || gameType === 'snes';
-  const isHost   = roomState?.hostId === roomState?.playerId;
-  el('romUrlRow').classList.toggle('hidden', !needsRom);
-  el('romUrlLabel').textContent = gameType === 'snes' ? 'ROM URL (.sfc / .smc)' : 'ROM URL (.nes)';
-  el('romUrlInput').placeholder  = gameType === 'snes'
-    ? 'https://example.com/game.sfc'
-    : 'https://example.com/game.nes';
-  el('gameTypeSelect').disabled = !isHost;
-  el('romUrlInput').disabled    = !isHost;
+  const gameType      = el('gameTypeSelect').value;
+  const isHost        = roomState?.hostId === roomState?.playerId;
+  const isRetroarch   = gameType === 'retroarch';
+  const isRomEmulator = gameType === 'nes' || gameType === 'snes' || isRetroarch;
+
+  el('coreUrlRow').classList.toggle('hidden', !isRetroarch);
+  el('coreWasmUrlRow').classList.toggle('hidden', !isRetroarch);
+  el('romUrlRow').classList.toggle('hidden', !isRomEmulator);
+
+  if (gameType === 'snes') {
+    el('romUrlLabel').textContent  = 'ROM URL (.sfc / .smc)';
+    el('romUrlInput').placeholder  = 'https://example.com/game.sfc';
+  } else if (isRetroarch) {
+    el('romUrlLabel').textContent  = 'ROM URL';
+    el('romUrlInput').placeholder  = 'https://example.com/game.rom';
+  } else {
+    el('romUrlLabel').textContent  = 'ROM URL (.nes)';
+    el('romUrlInput').placeholder  = 'https://example.com/game.nes';
+  }
+
+  el('gameTypeSelect').disabled    = !isHost;
+  el('romUrlInput').disabled       = !isHost;
+  el('coreUrlInput').disabled      = !isHost;
+  el('coreWasmUrlInput').disabled  = !isHost;
 }
 
 function updateRoomInfo() {
@@ -357,6 +385,55 @@ async function startNESGame(playerOrder, seed, romUrl) {
   const idx = playerOrder.indexOf(roomState.playerId);
   el('playerSlotLabel').textContent = idx >= 0 ? `You are Player ${idx + 1}` : 'Spectating';
   addChatLine('system', `NES game started! You are Player ${idx + 1}. Arrow keys / W·A·S·D · Z=A · X=B · Enter=Start · Shift=Select`);
+}
+
+/**
+ * Start a RetroArch game using any libretro core compiled to WebAssembly.
+ * Async — loads the core script, then fetches the ROM, then starts the engine.
+ *
+ * @param {string[]} playerOrder  ordered player IDs
+ * @param {number}   seed         shared PRNG seed (unused by libretro cores directly)
+ * @param {string}   romUrl       URL of the game ROM
+ * @param {string}   coreUrl      URL of the Emscripten JS glue for the libretro core
+ * @param {string}   [coreWasmUrl] optional URL of the separate .wasm file (two-file builds)
+ */
+async function startLibretroGame(playerOrder, seed, romUrl, coreUrl, coreWasmUrl) {
+  stopGame();
+
+  if (!coreUrl) throw new Error('No Core JS URL provided.');
+  if (!romUrl)  throw new Error('No ROM URL provided.');
+
+  const canvas = el('gameCanvas');
+
+  // Set an initial canvas size; LibretroAdapter._resize() will update it
+  // once retro_get_system_av_info returns the actual base resolution.
+  canvas.width  = 320;
+  canvas.height = 240;
+  canvas.style.removeProperty('width');
+  canvas.style.removeProperty('height');
+
+  el('loadingOverlay').textContent = 'Loading core…';
+  const coreModule = await LibretroAdapter.loadCore(
+    coreUrl,
+    coreWasmUrl || null,
+  );
+
+  el('loadingOverlay').textContent = 'Fetching ROM…';
+  game = new LibretroAdapter(canvas, playerOrder, coreModule);
+  await game.loadROM(romUrl);
+
+  // Apply 3× CSS scaling based on the resolved native resolution.
+  canvas.style.width  = `${canvas.width  * 3}px`;
+  canvas.style.height = `${canvas.height * 3}px`;
+
+  el('loadingOverlay').textContent = 'Starting…';
+  inputMgr = new InputManager();
+
+  _startEngine(playerOrder);
+
+  const idx = playerOrder.indexOf(roomState.playerId);
+  el('playerSlotLabel').textContent = idx >= 0 ? `You are Player ${idx + 1}` : 'Spectating';
+  addChatLine('system', `RetroArch game started! You are Player ${idx + 1}. Arrows/WASD · Z=A · X=B · C=X · V=Y · Q=L · E=R · Enter=Start · Shift=Select`);
 }
 
 /** Shared engine wiring used by both game types. */

@@ -74,6 +74,7 @@
             <strong>Pong</strong> — ↑↓ / W·S to move · first to 7 wins<br>
             <strong>NES</strong> &nbsp;— Arrows/WASD · Z=A · X=B · Enter=Start · Shift=Select<br>
             <strong>SNES</strong> — Arrows/WASD · Z=A · X=B · C=X · V=Y · Q=L · E=R · Enter=Start · Shift=Select<br>
+            <strong>RetroArch</strong> — any libretro core WASM · same controls as SNES<br>
             <strong>Gamepad</strong> — D-pad/stick · A=A · B=B · X=X · Y=Y · LB=L · RB=R · Start · Select
           </div>
         </div>
@@ -116,7 +117,22 @@
             <option value="pong">Pong (built-in demo)</option>
             <option value="nes">NES emulator</option>
             <option value="snes">SNES emulator</option>
+            <option value="retroarch">RetroArch (libretro core)</option>
           </select>
+        </div>
+
+        <div id="coreUrlRow" class="field-group hidden" style="margin-bottom:10px;">
+          <label for="coreUrlInput">Core JS URL (.js)</label>
+          <input type="text" id="coreUrlInput" placeholder="https://example.com/nestopia_libretro.js"
+                 autocomplete="off" spellcheck="false">
+          <span class="field-hint">Emscripten JS bundle for the libretro core (fetched server-side).</span>
+        </div>
+
+        <div id="coreWasmUrlRow" class="field-group hidden" style="margin-bottom:10px;">
+          <label for="coreWasmUrlInput">Core WASM URL (optional)</label>
+          <input type="text" id="coreWasmUrlInput" placeholder="https://example.com/nestopia_libretro.wasm"
+                 autocomplete="off" spellcheck="false">
+          <span class="field-hint">Only needed for two-file builds (separate .wasm from .js).</span>
         </div>
 
         <div id="romUrlRow" class="field-group hidden" style="margin-bottom:10px;">
@@ -156,6 +172,7 @@
 <script src="js/demo-game.js"></script>
 <script src="js/nes-adapter.js"></script>
 <script src="js/snes-adapter.js"></script>
+<script src="js/libretro-adapter.js"></script>
 <script src="js/network.js"></script>
 <script src="js/input.js"></script>
 <script src="js/app.js"></script>
