@@ -263,6 +263,31 @@ JSON
     ok "       public/cores/$id/core.wasm ($(du -sh "$out/core.wasm" | cut -f1))"
 }
 
+# ── Per-core source patches ────────────────────────────────────────────────────
+# Applied after fetch_source and before the build step.
+# Use minimal sed patches for cores whose upstream Makefiles have
+# Emscripten-version-specific issues.
+
+apply_patches() {
+    local id="$1"
+    local src="$SRC_DIR/$id"
+
+    case "$id" in
+        gearboy)
+            local mf="$src/platforms/libretro/Makefile"
+            if [[ -f "$mf" ]]; then
+                info "Patching gearboy Makefile (drop --relocatable for newer wasm-ld)…"
+                # Older gearboy Makefiles pass --relocatable to wasm-ld to produce a
+                # .bc side-module; newer wasm-ld rejects this flag entirely.
+                # Strip the flag and rename the output to .a (LLVM static archive),
+                # which Emscripten ≥ 3.x accepts as an input to the final emcc link.
+                sed -i 's/ --relocatable//g' "$mf"
+                sed -i 's/gearboy_libretro_emscripten\.bc/gearboy_libretro_emscripten.a/g' "$mf"
+            fi
+            ;;
+    esac
+}
+
 # ── Compile one core end-to-end ────────────────────────────────────────────────
 
 build_core() {
@@ -270,6 +295,7 @@ build_core() {
     [[ -v CORE_REPO[$id] ]] || die "Unknown core: '$id'. Run --list to see options."
 
     fetch_source "$id"
+    apply_patches "$id"
 
     case "${CORE_BUILD[$id]}" in
         cmake)
