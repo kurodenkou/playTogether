@@ -108,10 +108,24 @@ class SNESAdapter {
     try {
       this._audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       await this._audioCtx.audioWorklet.addModule('/js/snes-audio-worklet.js');
-      this._workletNode = new AudioWorkletNode(this._audioCtx, 'snes-audio-processor');
+      // Explicitly request stereo output — without this, some browsers default
+      // to mono (out[1] === undefined), which causes process() to crash silently.
+      this._workletNode = new AudioWorkletNode(
+        this._audioCtx,
+        'snes-audio-processor',
+        { numberOfOutputs: 1, outputChannelCount: [2] }
+      );
       this._workletNode.connect(this._audioCtx.destination);
+      // Try to start the AudioContext now, while we're still within the async
+      // chain that originated from the "Start Game" user gesture.  Chrome and
+      // Firefox honour resume() when there has been a prior user interaction on
+      // the page, so this should transition the context to 'running' before the
+      // first frame is simulated.
+      if (this._audioCtx.state === 'suspended') {
+        await this._audioCtx.resume().catch(() => {});
+      }
     } catch (err) {
-      console.warn('[SNESAdapter] AudioWorklet unavailable, audio disabled:', err.message);
+      console.error('[SNESAdapter] AudioWorklet setup failed, audio disabled:', err);
       this._audioCtx    = null;
       this._workletNode = null;
     }
