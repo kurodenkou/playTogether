@@ -121,6 +121,14 @@
           </select>
         </div>
 
+        <div id="coreSelectRow" class="field-group hidden" style="margin-bottom:10px;">
+          <label for="coreSelect">Installed core</label>
+          <select id="coreSelect">
+            <option value="">— or paste URLs below —</option>
+          </select>
+          <span class="field-hint">Cores built with <code>scripts/build-core.sh</code>.</span>
+        </div>
+
         <div id="coreUrlRow" class="field-group hidden" style="margin-bottom:10px;">
           <label for="coreUrlInput">Core JS URL (.js)</label>
           <input type="text" id="coreUrlInput" placeholder="https://example.com/nestopia_libretro.js"
