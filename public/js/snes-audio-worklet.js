@@ -42,7 +42,7 @@ class SNESAudioProcessor extends AudioWorkletProcessor {
   process(_inputs, outputs) {
     const out = outputs[0];
     const chL = out[0];
-    const chR = out[1];
+    const chR = out[1]; // may be undefined if output is mono
     if (!chL) return true;
 
     const n     = chL.length;
@@ -50,11 +50,13 @@ class SNESAudioProcessor extends AudioWorkletProcessor {
     const rd    = Math.min(n, avail);
 
     for (let i = 0; i < rd; i++) {
-      chL[i] = this._bufL[(this._rd + i) & this._mask];
-      chR[i] = this._bufR[(this._rd + i) & this._mask];
+      const l = this._bufL[(this._rd + i) & this._mask];
+      const r = this._bufR[(this._rd + i) & this._mask];
+      chL[i] = l;
+      if (chR) chR[i] = r; else chL[i] = (l + r) * 0.5; // mono mix
     }
     // Pad with silence if the buffer runs dry (startup / after rollback)
-    for (let i = rd; i < n; i++) { chL[i] = 0; chR[i] = 0; }
+    for (let i = rd; i < n; i++) { chL[i] = 0; if (chR) chR[i] = 0; }
     this._rd = (this._rd + rd) & this._mask;
 
     return true; // keep processor alive for the lifetime of the AudioContext
