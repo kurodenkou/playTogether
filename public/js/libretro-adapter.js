@@ -202,24 +202,79 @@ class LibretroAdapter {
   // ── Callback registration ────────────────────────────────────────────────────
 
   /**
+   * Register a JavaScript function in the WASM function table and return its index.
+   *
+   * Tries Module.addFunction first (requires the core to be compiled with
+   * ALLOW_TABLE_GROWTH=1 and EXPORTED_RUNTIME_METHODS=['addFunction']).
+   *
+   * Falls back to direct WebAssembly.Table manipulation, which works in all
+   * modern browsers regardless of Emscripten build flags, because the reference
+   * types proposal (funcref tables accepting JS callables) is universally
+   * supported since Chrome 96 / Firefox 79 / Safari 15.
+   *
+   * @param {Function} jsFunc  JavaScript function to register
+   * @param {string}   sig     Emscripten type signature (e.g. 'iii', 'viiii')
+   * @returns {number}  function table index (== C function pointer)
+   */
+  _addFn(jsFunc, sig) {
+    const M = this.M;
+
+    // Path 1: standard Emscripten addFunction
+    if (typeof M.addFunction === 'function') {
+      return M.addFunction(jsFunc, sig);
+    }
+
+    // Path 2: direct WebAssembly.Table manipulation.
+    // Emscripten exposes the function table as Module.wasmTable (older builds)
+    // or Module.__indirect_function_table (Emscripten 2.x+).
+    const table = M.wasmTable ?? M.__indirect_function_table;
+    if (!(table instanceof WebAssembly.Table)) {
+      throw new Error(
+        'LibretroAdapter: cannot register callbacks — core must be compiled with ' +
+        'ALLOW_TABLE_GROWTH=1 and EXPORTED_RUNTIME_METHODS=["addFunction"], or the ' +
+        'WebAssembly.Table must be accessible via Module.wasmTable / ' +
+        'Module.__indirect_function_table'
+      );
+    }
+
+    // Try to grow the table by one slot and claim it.
+    // If the table was created with a fixed maximum (grow() throws RangeError),
+    // scan from index 1 for a null slot left by a previous removeFunction() call.
+    try {
+      const idx = table.length;
+      table.grow(1);
+      table.set(idx, jsFunc);
+      return idx;
+    } catch (_growErr) {
+      for (let i = 1; i < table.length; i++) {
+        try {
+          if (table.get(i) === null) {
+            table.set(i, jsFunc);
+            return i;
+          }
+        } catch (_) { /* some slots may not be readable; skip */ }
+      }
+      throw new Error('LibretroAdapter: WASM function table is full — no slots available for callbacks');
+    }
+  }
+
+  /**
    * Register all required libretro callbacks with the core and call retro_init().
    * Must be called before loadROM().
    */
   _registerCallbacks() {
-    const M = this.M;
-
     // bool env(unsigned cmd, void *data)
-    this._callbacks.env = M.addFunction(
+    this._callbacks.env = this._addFn(
       (cmd, data) => this._onEnvironment(cmd, data) ? 1 : 0,
       'iii');
 
     // void video_refresh(const void *data, unsigned width, unsigned height, size_t pitch)
-    this._callbacks.video = M.addFunction(
+    this._callbacks.video = this._addFn(
       (dataPtr, width, height, pitch) => this._onVideoRefresh(dataPtr, width, height, pitch),
       'viiii');
 
     // void audio_sample(int16_t left, int16_t right)
-    this._callbacks.audioSample = M.addFunction((left, right) => {
+    this._callbacks.audioSample = this._addFn((left, right) => {
       if (this._audioMuted) return;
       this._singleSampleBuf[0] = left;
       this._singleSampleBuf[1] = right;
@@ -227,15 +282,15 @@ class LibretroAdapter {
     }, 'vii');
 
     // size_t audio_sample_batch(const int16_t *data, size_t frames)
-    this._callbacks.audioBatch = M.addFunction(
+    this._callbacks.audioBatch = this._addFn(
       (dataPtr, frames) => this._onAudioBatch(dataPtr, frames),
       'iii');
 
     // void input_poll(void)  — input is already snapshotted before step(); no-op here
-    this._callbacks.inputPoll = M.addFunction(() => {}, 'v');
+    this._callbacks.inputPoll = this._addFn(() => {}, 'v');
 
     // int16_t input_state(unsigned port, unsigned device, unsigned index, unsigned id)
-    this._callbacks.inputState = M.addFunction(
+    this._callbacks.inputState = this._addFn(
       (port, device, index, id) => this._onInputState(port, device, index, id),
       'iiiii');
 
@@ -298,7 +353,7 @@ class LibretroAdapter {
         // We declare the signature as (int level, const char* fmt) — variadic args
         // beyond the format string are ignored, which is safe for debug logging.
         if (!this._callbacks.log) {
-          this._callbacks.log = M.addFunction(
+          this._callbacks.log = this._addFn(
             (_level, fmtPtr) => console.log('[libretro core]', M.UTF8ToString(fmtPtr)),
             'vii');
         }
