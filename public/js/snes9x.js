@@ -2,7 +2,7 @@
 var SCREEN_BYTES=917504;
 var _audioCtx=null,_sp=null;
 var _aL=new Float32Array(32768),_aR=new Float32Array(32768);
-var _aW=0,_aRd=0,_aMask=32767,_aMuted=false,_aSamplesPerFrame=600;
+var _aW=0,_aRd=0,_aMask=32767,_aMuted=false;
 r.window.snineX={
 isReady:function(){return !!(t&&t._mainLoop&&t.HEAPU8);},
 initAudio:function(){
@@ -30,7 +30,6 @@ start:function(romData,sampleRate){
   var ptr=t._my_malloc(bytes.length);
   t.HEAPU8.set(bytes,ptr);
   t._startWithRom(ptr,bytes.length,sampleRate||36000);
-  _aSamplesPerFrame=Math.round((sampleRate||36000)/60);
   t._my_free(ptr);
 },
 step:function(j1,j2){
@@ -43,7 +42,7 @@ step:function(j1,j2){
     var ap=t._getSoundBuffer();
     if(ap){
       var s=new Float32Array(t.HEAPF32.buffer,ap,4096);
-      for(var i=0;i<_aSamplesPerFrame;i++){
+      for(var i=0;i<2048;i++){
         _aL[_aW]=s[i];_aR[_aW]=s[i+2048];
         _aW=(_aW+1)&_aMask;
       }
