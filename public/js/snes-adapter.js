@@ -11,7 +11,9 @@
  * injected into snes9x.js (a patched build of lrusso/SuperNintendo, which
  * itself is snes9x2005 compiled to WebAssembly via Emscripten).
  *
- * SNES display: 512 × 448 pixels (RGBA, 917 504 bytes).
+ * SNES display canvas: 256 × 224 pixels (native SNES resolution).
+ * WASM screen buffer: 512 × 448 RGBA (917 504 bytes) — game pixels occupy
+ * only the top-left 256 × 224 region; putImageData clips the rest.
  * JOYPAD bit encoding (snes9x register format):
  *   B=0x8000  Y=0x4000  SELECT=0x2000  START=0x1000
  *   UP=0x0800 DOWN=0x0400 LEFT=0x0200 RIGHT=0x0100
@@ -27,8 +29,16 @@
  *   R   → SNES R  (InputBits.R)
  */
 class SNESAdapter {
-  static SNES_W = 512;
-  static SNES_H = 448;
+  // Display canvas dimensions: native SNES resolution (256×224).
+  // The WASM screen buffer is allocated at 512×448 (SCREEN_BUF_W × SCREEN_BUF_H)
+  // for hi-res / compatibility reasons, but actual game pixels occupy only the
+  // top-left 256×224 region.  ctx.putImageData clips to canvas bounds, so
+  // setting the canvas to 256×224 renders the correct game area automatically.
+  static SNES_W = 256;
+  static SNES_H = 224;
+  // WASM screen-buffer dimensions — must match SCREEN_BYTES in snes9x.js.
+  static SCREEN_BUF_W = 512;
+  static SCREEN_BUF_H = 448;
 
   /**
    * @param {HTMLCanvasElement} canvas
@@ -42,8 +52,10 @@ class SNESAdapter {
     canvas.width  = SNESAdapter.SNES_W;
     canvas.height = SNESAdapter.SNES_H;
 
-    // Off-screen ImageData for fast canvas writes
-    this._imageData = this.ctx.createImageData(SNESAdapter.SNES_W, SNESAdapter.SNES_H);
+    // ImageData must match the WASM screen buffer (512×448), not the display
+    // canvas (256×224).  putImageData clips to the canvas, so only the
+    // top-left 256×224 pixels — where the emulator places the game — are shown.
+    this._imageData = this.ctx.createImageData(SNESAdapter.SCREEN_BUF_W, SNESAdapter.SCREEN_BUF_H);
 
     this._romLoaded = false;
     this._audioMuted = false;
