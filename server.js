@@ -32,13 +32,48 @@ app.get('/js/snes9x.js', (_req, res) =>
 );
 
 // ── ROM proxy ──────────────────────────────────────────────────────────────────
-// Fetches a .nes ROM from an arbitrary URL and relays the bytes to the browser.
-// This avoids CORS issues when the ROM host doesn't set permissive headers.
+// Fetches a .nes/.sfc ROM from an arbitrary URL and relays the bytes to the
+// browser.  This avoids CORS issues when the ROM host doesn't set permissive
+// headers.
 //
 // Security considerations:
 //   • Only HTTP/HTTPS origins are accepted (no file://, data:, etc.)
-//   • The server acts as a forwarding proxy, not a storage layer.
 //   • A 16 MB size limit prevents memory exhaustion.
+//
+// Performance:
+//   • ROMs are cached in memory (up to ROM_CACHE_MAX_BYTES total) so that
+//     subsequent requests — e.g. the second player joining the same room —
+//     are served instantly without a second upstream fetch.
+//   • Entries are evicted oldest-first when the cache would exceed the limit.
+
+const ROM_CACHE_MAX_BYTES = 64 * 1024 * 1024; // 64 MB total
+/** @type {Map<string, {buf: Buffer, size: number, ts: number}>} */
+const romCache = new Map();
+let romCacheTotalBytes = 0;
+
+function romCacheGet(url) {
+  const entry = romCache.get(url);
+  if (!entry) return null;
+  entry.ts = Date.now(); // refresh for LRU ordering
+  return entry.buf;
+}
+
+function romCacheSet(url, buf) {
+  if (buf.length > ROM_CACHE_MAX_BYTES) return; // single entry too large to cache
+  // Evict oldest entries until there is room
+  while (romCacheTotalBytes + buf.length > ROM_CACHE_MAX_BYTES && romCache.size > 0) {
+    let oldestKey, oldestTs = Infinity;
+    for (const [k, v] of romCache) {
+      if (v.ts < oldestTs) { oldestTs = v.ts; oldestKey = k; }
+    }
+    const evicted = romCache.get(oldestKey);
+    romCache.delete(oldestKey);
+    romCacheTotalBytes -= evicted.size;
+  }
+  romCache.set(url, { buf, size: buf.length, ts: Date.now() });
+  romCacheTotalBytes += buf.length;
+}
+
 app.get('/rom-proxy', async (req, res) => {
   const romUrl = req.query.url;
   if (!romUrl) return res.status(400).send('url parameter required');
@@ -49,6 +84,15 @@ app.get('/rom-proxy', async (req, res) => {
   }
   if (!['http:', 'https:'].includes(parsed.protocol)) {
     return res.status(400).send('Only HTTP and HTTPS URLs are supported');
+  }
+
+  // Serve from cache when available
+  const cached = romCacheGet(romUrl);
+  if (cached) {
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    res.setHeader('X-ROM-Cache', 'HIT');
+    return res.send(cached);
   }
 
   try {
@@ -70,9 +114,13 @@ app.get('/rom-proxy', async (req, res) => {
       return res.status(413).send('ROM too large (max 16 MB)');
     }
 
+    const buf = Buffer.from(buffer);
+    romCacheSet(romUrl, buf);
+
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Cache-Control', 'public, max-age=3600');
-    res.send(Buffer.from(buffer));
+    res.setHeader('X-ROM-Cache', 'MISS');
+    res.send(buf);
   } catch (err) {
     console.error('[rom-proxy]', err.message);
     res.status(500).send(`Failed to fetch ROM: ${err.message}`);
