@@ -93,8 +93,8 @@ class SNESAdapter {
    * snes9x.js initialises its WASM module asynchronously at script load time;
    * by the time loadROM is called the module is almost always ready, but we
    * poll briefly just in case.
-   * Timeout is 30 seconds (600 × 50 ms) to allow for slow connections and
-   * devices that need more time to parse and compile the 951 KB WASM bundle.
+   * Timeout is 10 seconds (200 × 50 ms) to cover slow devices; in practice
+   * the module is ready within milliseconds of the WASM compile finishing.
    */
   _waitForWasm() {
     return new Promise((resolve, reject) => {
@@ -102,7 +102,7 @@ class SNESAdapter {
       let tries = 0;
       const id = setInterval(() => {
         if (window.snineX.isReady()) { clearInterval(id); resolve(); return; }
-        if (++tries > 600) { clearInterval(id); reject(new Error('snes9x WASM init timed out')); }
+        if (++tries > 200) { clearInterval(id); reject(new Error('snes9x WASM init timed out')); }
       }, 50);
     });
   }
