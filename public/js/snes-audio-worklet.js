@@ -11,6 +11,15 @@
  * The worklet buffers incoming frames in an internal ring buffer and drains
  * them into the Web Audio output buffers at whatever quantum size the browser
  * chooses (typically 128 frames).
+ *
+ * Dynamic Rate Control (DRC)
+ * ──────────────────────────
+ * A proportional controller adjusts the playback rate each quantum to keep
+ * the ring buffer near a target fill level.  When the buffer runs ahead of
+ * target the rate rises slightly (consuming input faster); when it falls
+ * behind the rate drops (consuming input slower).  Linear interpolation
+ * produces smooth output at any fractional rate.  Rate is clamped to ±5 %
+ * so pitch deviation remains below the threshold of audible perception.
  */
 class SNESAudioProcessor extends AudioWorkletProcessor {
   static get parameterDescriptors() { return []; }
@@ -18,28 +27,35 @@ class SNESAudioProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
 
-    // Ring buffer: 4096 stereo frames ≈ 68 ms at 60 fps (735 samples/frame).
-    // Large enough to absorb scheduling jitter without audible latency.
-    this._size = 4096;
+    // Ring buffer: 8192 stereo sample-pairs ≈ 186 ms at 44 100 Hz.
+    // Large enough to absorb scheduling jitter and rollback re-simulation
+    // gaps without audible latency.
+    this._size = 8192;
     this._mask = this._size - 1;
     this._bufL = new Float32Array(this._size);
     this._bufR = new Float32Array(this._size);
-    this._wr   = 0; // write head (main-thread messages)
-    this._rd   = 0; // read  head (process() drain)
+    this._wr   = 0;    // write head (integer)
+    this._rd   = 0;    // read  head (integer)
+    this._rdF  = 0.0;  // fractional part of read position [0, 1)
+
+    // DRC target: keep the buffer 25 % full (≈ 46 ms at 44 100 Hz).
+    // Proportional gain of 0.1 / size yields ≤ 1.25 % rate correction per
+    // quantum at the maximum expected fill deviation, converging in ≈ 1 s.
+    this._target = this._size >> 2; // 2048 sample-pairs
 
     this.port.onmessage = ({ data }) => {
-      if (!data || !data.samples) return;
-      const s = data.samples; // interleaved Float32: L0,R0,L1,R1,...
-      const n = s.length >> 1; // stereo frame count
+      if (!data?.samples) return;
+      const s = data.samples; // interleaved Float32: L0,R0,L1,R1,…
+      const n = s.length >> 1; // stereo sample-pair count
 
-      // Overflow guard: if there is not enough space, discard the oldest samples
-      // to make room.  This keeps the write pointer from silently lapping the read
-      // pointer, which would corrupt the avail calculation in process() and produce
+      // Overflow guard: discard oldest samples rather than silently lapping
+      // the read pointer, which would corrupt the avail calculation and cause
       // silence gaps.  We leave one slot empty so _wr==_rd always means "empty".
       const avail = (this._wr - this._rd) & this._mask;
       const space = this._size - 1 - avail;
       if (n > space) {
-        this._rd = (this._rd + (n - space)) & this._mask; // drop oldest
+        this._rd  = (this._rd + (n - space)) & this._mask;
+        this._rdF = 0;
       }
 
       for (let i = 0; i < n; i++) {
@@ -56,21 +72,57 @@ class SNESAudioProcessor extends AudioWorkletProcessor {
     const chR = out[1]; // may be undefined if output is mono
     if (!chL) return true;
 
-    const n     = chL.length;
+    const n     = chL.length;                            // typically 128
     const avail = (this._wr - this._rd) & this._mask;
-    const rd    = Math.min(n, avail);
 
-    for (let i = 0; i < rd; i++) {
-      const l = this._bufL[(this._rd + i) & this._mask];
-      const r = this._bufR[(this._rd + i) & this._mask];
-      chL[i] = l;
-      if (chR) chR[i] = r; else chL[i] = (l + r) * 0.5; // mono mix
+    // ── DRC: proportional controller ────────────────────────────────────────
+    // rate > 1 → consume input faster (buffer above target, draining it)
+    // rate < 1 → consume input slower (buffer below target, letting it fill)
+    // Clamped to ±5 % — pitch deviation is imperceptible at this range.
+    const rate = Math.max(0.95, Math.min(1.05,
+      1.0 + 0.1 * (avail - this._target) / this._size
+    ));
+
+    if (avail === 0) {
+      // Buffer completely empty — output silence.
+      chL.fill(0);
+      if (chR) chR.fill(0);
+      return true;
     }
-    // Pad with silence if the buffer runs dry (startup / after rollback)
-    for (let i = rd; i < n; i++) { chL[i] = 0; if (chR) chR[i] = 0; }
-    this._rd = (this._rd + rd) & this._mask;
 
-    return true; // keep processor alive for the lifetime of the AudioContext
+    // ── Linear-interpolation resampling ─────────────────────────────────────
+    // Read at `rate` input samples per output sample.  The fractional read
+    // position (_rdF) is carried across process() calls so there are no
+    // phase discontinuities at quantum boundaries.
+    let pos = this._rdF; // fractional offset from _rd
+
+    for (let i = 0; i < n; i++) {
+      const fl   = pos | 0;                              // floor(pos)
+      const frac = pos - fl;
+
+      if (fl >= avail) {
+        // Ran out of buffered data mid-quantum — pad remainder with silence.
+        chL[i] = 0;
+        if (chR) chR[i] = 0;
+      } else {
+        const i0 = (this._rd + fl)                          & this._mask;
+        const i1 = (this._rd + Math.min(fl + 1, avail - 1)) & this._mask;
+        const l  = this._bufL[i0] + frac * (this._bufL[i1] - this._bufL[i0]);
+        const r  = this._bufR[i0] + frac * (this._bufR[i1] - this._bufR[i0]);
+        chL[i]   = l;
+        if (chR) chR[i] = r; else chL[i] = (l + r) * 0.5;
+      }
+
+      pos += rate;
+    }
+
+    // Advance the integer read head by the samples consumed; carry the
+    // fractional remainder into the next quantum.
+    const consumed = pos | 0;
+    this._rdF = pos - consumed;
+    this._rd  = (this._rd + Math.min(consumed, avail)) & this._mask;
+
+    return true;
   }
 }
 
