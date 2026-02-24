@@ -116,6 +116,14 @@ class SNESAdapter {
         { numberOfOutputs: 1, outputChannelCount: [2] }
       );
       this._workletNode.connect(this._audioCtx.destination);
+      // Pre-fill the ring buffer with 2 frames of silence before the game loop
+      // starts.  Without this the buffer starts empty and any tiny main-thread
+      // hiccup (a late rAF tick) causes an immediate underflow click.  Two
+      // frames ≈ 33 ms — imperceptible as startup latency, but enough headroom
+      // to absorb normal scheduling jitter.
+      const preFillSamples = Math.round(this._audioCtx.sampleRate / 60) * 2;
+      const silence = new Float32Array(preFillSamples * 2); // interleaved stereo zeros
+      this._workletNode.port.postMessage({ samples: silence }, [silence.buffer]);
       // Try to start the AudioContext now, while we're still within the async
       // chain that originated from the "Start Game" user gesture.  Chrome and
       // Firefox honour resume() when there has been a prior user interaction on

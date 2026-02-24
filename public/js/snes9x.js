@@ -3,7 +3,7 @@ var SCREEN_BYTES=917504;
 // _samplesPerFrame: updated by start() from the AudioContext sample rate.
 // _lastAudioBuf: WASM pointer to the sound buffer produced by the most recent step().
 //   Consumed once per frame by getAudioSamples() (called by SNESAdapter).
-var _samplesPerFrame=735,_lastAudioBuf=0;
+var _samplesPerFrame=735,_wasmSamplesPerFrame=735,_lastAudioBuf=0;
 r.window.snineX={
 isReady:function(){return !!(t&&t._mainLoop&&t.HEAPU8);},
 // Audio is now managed by SNESAdapter via AudioWorklet (snes-audio-worklet.js).
@@ -16,7 +16,7 @@ start:function(romData,sampleRate){
   var ptr=t._my_malloc(bytes.length);
   t.HEAPU8.set(bytes,ptr);
   t._startWithRom(ptr,bytes.length,sampleRate||36000);
-  _samplesPerFrame=Math.round((sampleRate||36000)/60)   /* match 60fps game loop, not SNES 60.0988fps */;
+  _samplesPerFrame=Math.round((sampleRate||36000)/60);  _wasmSamplesPerFrame=Math.round((sampleRate||36000)/60.0988);
   t._my_free(ptr);
 },
 step:function(j1,j2){
@@ -34,8 +34,11 @@ step:function(j1,j2){
 getAudioSamples:function(){
   if(!_lastAudioBuf||!t.HEAPF32)return null;
   var s=new Float32Array(t.HEAPF32.buffer,_lastAudioBuf,4096);
-  var out=new Float32Array(_samplesPerFrame*2);
-  for(var i=0;i<_samplesPerFrame;i++){out[i*2]=s[i];out[i*2+1]=s[i+2048];}
+  var out=new Float32Array(_samplesPerFrame*2); // zero-initialised; stale WASM bytes never read
+  // Only copy the samples the WASM actually wrote this frame.  _samplesPerFrame may be 1 larger
+  // (round(sr/60) vs round(sr/60.0988)), so the last slot stays 0 rather than reading stale data.
+  var n=Math.min(_samplesPerFrame,_wasmSamplesPerFrame);
+  for(var i=0;i<n;i++){out[i*2]=s[i];out[i*2+1]=s[i+2048];}
   return out;
 },
 render:function(ctx,imgData){
