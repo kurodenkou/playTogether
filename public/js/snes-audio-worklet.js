@@ -31,6 +31,17 @@ class SNESAudioProcessor extends AudioWorkletProcessor {
       if (!data || !data.samples) return;
       const s = data.samples; // interleaved Float32: L0,R0,L1,R1,...
       const n = s.length >> 1; // stereo frame count
+
+      // Overflow guard: if there is not enough space, discard the oldest samples
+      // to make room.  This keeps the write pointer from silently lapping the read
+      // pointer, which would corrupt the avail calculation in process() and produce
+      // silence gaps.  We leave one slot empty so _wr==_rd always means "empty".
+      const avail = (this._wr - this._rd) & this._mask;
+      const space = this._size - 1 - avail;
+      if (n > space) {
+        this._rd = (this._rd + (n - space)) & this._mask; // drop oldest
+      }
+
       for (let i = 0; i < n; i++) {
         this._bufL[this._wr] = s[i * 2];
         this._bufR[this._wr] = s[i * 2 + 1];

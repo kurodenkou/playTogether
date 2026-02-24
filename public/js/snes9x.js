@@ -16,7 +16,7 @@ start:function(romData,sampleRate){
   var ptr=t._my_malloc(bytes.length);
   t.HEAPU8.set(bytes,ptr);
   t._startWithRom(ptr,bytes.length,sampleRate||36000);
-  _samplesPerFrame=Math.round((sampleRate||36000)/60.0988);
+  _samplesPerFrame=Math.round((sampleRate||36000)/60)   /* match 60fps game loop, not SNES 60.0988fps */;
   t._my_free(ptr);
 },
 step:function(j1,j2){
