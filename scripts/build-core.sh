@@ -225,6 +225,15 @@ build_cmake_mgba() {
     rm -rf "$build"
     mkdir -p "$build"
 
+    # strdup / strlcpy are POSIX/BSD extensions not visible in strict C99 mode.
+    # Emscripten's musl string.h gates strdup behind _GNU_SOURCE.  Rather than
+    # relying on CMake to propagate a -D flag through mGBA's internal targets,
+    # we create a tiny compat header and force-include it via -include so that
+    # every translation unit sees the declaration before its own #includes.
+    local compat_h="$build/mgba_strcompat.h"
+    printf '#ifndef _GNU_SOURCE\n#define _GNU_SOURCE\n#endif\n#include <string.h>\n' \
+        > "$compat_h"
+
     # Emscripten provides a CMake toolchain file.
     local toolchain
     toolchain=$(em-config EMSCRIPTEN_ROOT)/cmake/Modules/Platform/Emscripten.cmake
@@ -237,8 +246,8 @@ build_cmake_mgba() {
         -DBUILD_STATIC=ON \
         -DUSE_EPOXY=OFF \
         -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_C_FLAGS="-D_GNU_SOURCE" \
-        -DCMAKE_CXX_FLAGS="-D_GNU_SOURCE"
+        -DCMAKE_C_FLAGS="-D_GNU_SOURCE -include $compat_h" \
+        -DCMAKE_CXX_FLAGS="-D_GNU_SOURCE -include $compat_h"
 
     cmake --build "$build" -j"$(nproc 2>/dev/null || echo 4)"
 }
