@@ -628,26 +628,58 @@ class LibretroAdapter {
 
     const M = this.M;
 
+    // Query retro_system_info before loading.
+    // retro_system_info layout (32-bit WASM):
+    //   library_name (char*)    offset  0
+    //   library_version (char*) offset  4
+    //   valid_extensions (char*)offset  8
+    //   need_fullpath (bool)    offset 12
+    //   block_extract (bool)    offset 13
+    // Allocate 20 bytes for safety alignment.
+    const sysInfoPtr = M._malloc(20);
+    M._retro_get_system_info(sysInfoPtr);
+    const needFullPath = M.HEAPU8[sysInfoPtr + 12] !== 0;
+    M._free(sysInfoPtr);
+
+    if (needFullPath) {
+      throw new Error(
+        'This core requires a real filesystem path (need_fullpath=true) ' +
+        'and cannot accept in-memory ROM data. ' +
+        'Use a core that supports in-memory loading.'
+      );
+    }
+
     // Copy ROM bytes onto the WASM heap so we can pass a pointer to the core.
     const romPtr = M._malloc(buf.byteLength);
     if (!romPtr) throw new Error('WASM heap exhausted allocating ROM buffer');
     M.HEAPU8.set(new Uint8Array(buf), romPtr);
+
+    // Many cores inspect the file extension from retro_game_info.path to
+    // choose the right ROM loader.  Passing NULL forces them to guess from
+    // magic bytes, which some cores don't support.  Write the URL's filename
+    // (e.g. "mario.sfc") as a null-terminated C string and use it as path.
+    const filename  = new URL(url, location.href).pathname.split('/').filter(Boolean).pop() ?? 'rom';
+    const pathBytes = new TextEncoder().encode(filename + '\0');
+    const pathPtr   = M._malloc(pathBytes.length);
+    if (pathPtr) M.HEAPU8.set(pathBytes, pathPtr);
 
     // Build retro_game_info on the heap.
     // struct { const char *path; const void *data; size_t size; const char *meta; }
     // 4 × 4 bytes = 16 bytes on 32-bit WASM.
     const infoPtr = M._malloc(16);
     if (!infoPtr) {
+      if (pathPtr) M._free(pathPtr);
       M._free(romPtr);
       throw new Error('WASM heap exhausted allocating retro_game_info struct');
     }
-    M.HEAPU32[(infoPtr     ) >> 2] = 0;             // path = NULL (use raw bytes)
+    M.HEAPU32[(infoPtr     ) >> 2] = pathPtr || 0;  // filename for extension sniffing
     M.HEAPU32[(infoPtr +  4) >> 2] = romPtr;         // data pointer
     M.HEAPU32[(infoPtr +  8) >> 2] = buf.byteLength; // size
-    M.HEAPU32[(infoPtr + 12) >> 2] = 0;             // meta = NULL
+    M.HEAPU32[(infoPtr + 12) >> 2] = 0;              // meta = NULL
 
     const ok = M._retro_load_game(infoPtr);
     M._free(infoPtr);
+    if (pathPtr) M._free(pathPtr);
     M._free(romPtr);
 
     if (!ok) {
