@@ -251,9 +251,13 @@ link_core() {
     mkdir -p "$out"
     info "Linking $id → public/cores/$id/core.js …"
 
-    # Resolve Emscripten's bundled libz.a by full path so wasm-ld finds it
-    # regardless of flag ordering (emcc puts user -l flags before the sysroot
-    # -L paths in the final wasm-ld invocation, which breaks plain -lz).
+    # Emscripten lazily compiles system libraries; ensure libz.a is cached
+    # before linking so the explicit path below actually exists.
+    embuilder build zlib
+
+    # Pass the full path rather than -lz: emcc puts user-supplied -l flags
+    # before the sysroot -L entries in the final wasm-ld invocation, so a
+    # bare -lz fails to resolve.  Using the absolute path sidesteps ordering.
     local em_libz
     em_libz="$(em-config CACHE)/sysroot/lib/wasm32-emscripten/libz.a"
 
