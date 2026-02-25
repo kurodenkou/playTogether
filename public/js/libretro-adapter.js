@@ -641,46 +641,87 @@ class LibretroAdapter {
     const needFullPath = M.HEAPU8[sysInfoPtr + 12] !== 0;
     M._free(sysInfoPtr);
 
+    // Extract the filename (e.g. "mario.sfc") for path/extension sniffing.
+    const filename = new URL(url, location.href).pathname.split('/').filter(Boolean).pop() ?? 'rom';
+
+    let ok = false;
+
     if (needFullPath) {
-      throw new Error(
-        'This core requires a real filesystem path (need_fullpath=true) ' +
-        'and cannot accept in-memory ROM data. ' +
-        'Use a core that supports in-memory loading.'
-      );
-    }
+      // ── Virtual-FS path ────────────────────────────────────────────────────
+      // The core calls fopen() itself; it cannot use an in-memory data pointer.
+      // Write the ROM bytes into Emscripten's in-memory virtual filesystem so
+      // the core can open them via a normal C path.
+      // M.FS may not be exported; fall back to the global FS injected by the
+      // Emscripten glue.
+      const FS = M.FS ?? globalThis.FS;
+      if (!FS) {
+        throw new Error(
+          'This core requires a filesystem path (need_fullpath=true) but the ' +
+          'Emscripten FS module is not accessible.  Recompile the core with ' +
+          'EXPORTED_RUNTIME_METHODS=[\'FS\'] or ensure it is otherwise exported.'
+        );
+      }
 
-    // Copy ROM bytes onto the WASM heap so we can pass a pointer to the core.
-    const romPtr = M._malloc(buf.byteLength);
-    if (!romPtr) throw new Error('WASM heap exhausted allocating ROM buffer');
-    M.HEAPU8.set(new Uint8Array(buf), romPtr);
+      const virtPath = `/tmp/${filename}`;
+      try { FS.mkdir('/tmp'); } catch (_) { /* already exists */ }
+      FS.writeFile(virtPath, new Uint8Array(buf));
 
-    // Many cores inspect the file extension from retro_game_info.path to
-    // choose the right ROM loader.  Passing NULL forces them to guess from
-    // magic bytes, which some cores don't support.  Write the URL's filename
-    // (e.g. "mario.sfc") as a null-terminated C string and use it as path.
-    const filename  = new URL(url, location.href).pathname.split('/').filter(Boolean).pop() ?? 'rom';
-    const pathBytes = new TextEncoder().encode(filename + '\0');
-    const pathPtr   = M._malloc(pathBytes.length);
-    if (pathPtr) M.HEAPU8.set(pathBytes, pathPtr);
+      // Write the virtual path as a C string on the wasm heap.
+      const pathBytes = new TextEncoder().encode(virtPath + '\0');
+      const pathPtr   = M._malloc(pathBytes.length);
+      if (pathPtr) M.HEAPU8.set(pathBytes, pathPtr);
 
-    // Build retro_game_info on the heap.
-    // struct { const char *path; const void *data; size_t size; const char *meta; }
-    // 4 × 4 bytes = 16 bytes on 32-bit WASM.
-    const infoPtr = M._malloc(16);
-    if (!infoPtr) {
+      // Build retro_game_info: path set, data/size cleared.
+      const infoPtr = M._malloc(16);
+      if (!infoPtr) {
+        if (pathPtr) M._free(pathPtr);
+        try { FS.unlink(virtPath); } catch (_) {}
+        throw new Error('WASM heap exhausted allocating retro_game_info struct');
+      }
+      M.HEAPU32[(infoPtr     ) >> 2] = pathPtr || 0;
+      M.HEAPU32[(infoPtr +  4) >> 2] = 0;              // data = NULL
+      M.HEAPU32[(infoPtr +  8) >> 2] = 0;              // size = 0
+      M.HEAPU32[(infoPtr + 12) >> 2] = 0;              // meta = NULL
+
+      ok = M._retro_load_game(infoPtr);
+      M._free(infoPtr);
+      if (pathPtr) M._free(pathPtr);
+      // The core has already opened (and typically fully read) the file.
+      // Unlink it now; Emscripten MEMFS keeps the data alive until the last
+      // file descriptor is closed, matching POSIX unlink-while-open semantics.
+      try { FS.unlink(virtPath); } catch (_) {}
+
+    } else {
+      // ── In-memory path ─────────────────────────────────────────────────────
+      // Copy ROM bytes onto the WASM heap so we can pass a pointer to the core.
+      const romPtr = M._malloc(buf.byteLength);
+      if (!romPtr) throw new Error('WASM heap exhausted allocating ROM buffer');
+      M.HEAPU8.set(new Uint8Array(buf), romPtr);
+
+      // Write the filename as a null-terminated C string for extension sniffing.
+      const pathBytes = new TextEncoder().encode(filename + '\0');
+      const pathPtr   = M._malloc(pathBytes.length);
+      if (pathPtr) M.HEAPU8.set(pathBytes, pathPtr);
+
+      // Build retro_game_info on the heap.
+      // struct { const char *path; const void *data; size_t size; const char *meta; }
+      // 4 × 4 bytes = 16 bytes on 32-bit WASM.
+      const infoPtr = M._malloc(16);
+      if (!infoPtr) {
+        if (pathPtr) M._free(pathPtr);
+        M._free(romPtr);
+        throw new Error('WASM heap exhausted allocating retro_game_info struct');
+      }
+      M.HEAPU32[(infoPtr     ) >> 2] = pathPtr || 0;
+      M.HEAPU32[(infoPtr +  4) >> 2] = romPtr;
+      M.HEAPU32[(infoPtr +  8) >> 2] = buf.byteLength;
+      M.HEAPU32[(infoPtr + 12) >> 2] = 0;              // meta = NULL
+
+      ok = M._retro_load_game(infoPtr);
+      M._free(infoPtr);
       if (pathPtr) M._free(pathPtr);
       M._free(romPtr);
-      throw new Error('WASM heap exhausted allocating retro_game_info struct');
     }
-    M.HEAPU32[(infoPtr     ) >> 2] = pathPtr || 0;  // filename for extension sniffing
-    M.HEAPU32[(infoPtr +  4) >> 2] = romPtr;         // data pointer
-    M.HEAPU32[(infoPtr +  8) >> 2] = buf.byteLength; // size
-    M.HEAPU32[(infoPtr + 12) >> 2] = 0;              // meta = NULL
-
-    const ok = M._retro_load_game(infoPtr);
-    M._free(infoPtr);
-    if (pathPtr) M._free(pathPtr);
-    M._free(romPtr);
 
     if (!ok) {
       throw new Error('retro_load_game() returned false — ROM rejected by core (wrong system or corrupt file)');
