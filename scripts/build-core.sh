@@ -60,7 +60,7 @@ declare -A CORE_REPO CORE_NAME CORE_SYSTEM CORE_BUILD
 CORE_REPO[fceumm]="https://github.com/libretro/libretro-fceumm.git"
 CORE_NAME[fceumm]="FCEUmm (NES)"
 CORE_SYSTEM[fceumm]="nes"
-CORE_BUILD[fceumm]="make"
+CORE_BUILD[fceumm]="make_static_override"
 
 CORE_REPO[nestopia]="https://github.com/libretro/nestopia.git"
 CORE_NAME[nestopia]="Nestopia (NES)"
@@ -236,7 +236,9 @@ build_cmake_mgba() {
         -DBUILD_QT=OFF \
         -DBUILD_STATIC=ON \
         -DUSE_EPOXY=OFF \
-        -DCMAKE_BUILD_TYPE=Release
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_C_FLAGS="-D_GNU_SOURCE" \
+        -DCMAKE_CXX_FLAGS="-D_GNU_SOURCE"
 
     cmake --build "$build" -j"$(nproc 2>/dev/null || echo 4)"
 }
