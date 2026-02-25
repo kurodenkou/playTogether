@@ -60,7 +60,7 @@ declare -A CORE_REPO CORE_NAME CORE_SYSTEM CORE_BUILD
 CORE_REPO[fceumm]="https://github.com/libretro/libretro-fceumm.git"
 CORE_NAME[fceumm]="FCEUmm (NES)"
 CORE_SYSTEM[fceumm]="nes"
-CORE_BUILD[fceumm]="make"
+CORE_BUILD[fceumm]="make_static_override"
 
 CORE_REPO[nestopia]="https://github.com/libretro/nestopia.git"
 CORE_NAME[nestopia]="Nestopia (NES)"
