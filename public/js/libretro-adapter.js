@@ -294,19 +294,37 @@ class LibretroAdapter {
       );
     }
 
+    // Wrap the JS function as a typed WebAssembly.Function so that
+    // call_indirect's runtime type-check passes.  A plain JS function has no
+    // wasm type annotation; placing it in the table without one causes a
+    // "function signature mismatch" trap when the core calls it.
+    // WebAssembly.Function (Type Reflections proposal) is available since
+    // Chrome 95 / Firefox 91 / Safari 15 — the same baseline we already
+    // require for WebAssembly.Table.grow().
+    const emscSigToWasmType = (s) => {
+      const v = { i: 'i32', j: 'i64', f: 'f32', d: 'f64', p: 'i32' };
+      return {
+        parameters: [...s.slice(1)].map(c => v[c] ?? 'i32'),
+        results:    s[0] === 'v' ? [] : [v[s[0]] ?? 'i32'],
+      };
+    };
+    const typedFn = typeof WebAssembly.Function === 'function'
+      ? new WebAssembly.Function(emscSigToWasmType(sig), jsFunc)
+      : jsFunc; // last-resort fallback for engines without type-reflection
+
     // Try to grow the table by one slot and claim it.
     // If the table was created with a fixed maximum (grow() throws RangeError),
     // scan from index 1 for a null slot left by a previous removeFunction() call.
     try {
       const idx = table.length;
       table.grow(1);
-      table.set(idx, jsFunc);
+      table.set(idx, typedFn);
       return idx;
     } catch (_growErr) {
       for (let i = 1; i < table.length; i++) {
         try {
           if (table.get(i) === null) {
-            table.set(i, jsFunc);
+            table.set(i, typedFn);
             return i;
           }
         } catch (_) { /* some slots may not be readable; skip */ }
