@@ -294,6 +294,7 @@ class LibretroAdapter {
       (port, device, index, id) => this._onInputState(port, device, index, id),
       'iiiii');
 
+    const M = this.M;
     M._retro_set_environment(this._callbacks.env);
     M._retro_set_video_refresh(this._callbacks.video);
     M._retro_set_audio_sample(this._callbacks.audioSample);
