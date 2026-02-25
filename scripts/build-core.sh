@@ -234,24 +234,42 @@ build_cmake_mgba() {
     printf '#ifndef _GNU_SOURCE\n#define _GNU_SOURCE\n#endif\n#include <string.h>\n' \
         > "$compat_h"
 
-    # Emscripten provides a CMake toolchain file.
-    local toolchain
-    toolchain=$(em-config EMSCRIPTEN_ROOT)/cmake/Modules/Platform/Emscripten.cmake
-
-    cmake -S "$src" -B "$build" \
-        -DCMAKE_TOOLCHAIN_FILE="$toolchain" \
+    # emcmake sets CMAKE_TOOLCHAIN_FILE and all Emscripten env vars
+    # automatically.  Locating the toolchain file by path is fragile across
+    # Emscripten versions (the cmake/ tree moved in 3.x).
+    emcmake cmake -S "$src" -B "$build" \
         -DBUILD_LIBRETRO=ON \
         -DBUILD_SDL=OFF \
         -DBUILD_QT=OFF \
         -DBUILD_STATIC=ON \
+        -DBUILD_TESTING=OFF \
         -DUSE_EPOXY=OFF \
         -DENABLE_SCRIPTING=OFF \
         -DUSE_LUA=OFF \
+        -DENABLE_FFMPEG=OFF \
+        -DENABLE_SQLITE3=OFF \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_C_FLAGS="-D_GNU_SOURCE -include $compat_h" \
         -DCMAKE_CXX_FLAGS="-D_GNU_SOURCE -include $compat_h"
 
-    cmake --build "$build" -j"$(nproc 2>/dev/null || echo 4)"
+    # mGBA's libretro CMake target is declared SHARED.  wasm-ld ≥ 3.x rejects
+    # the --shared flag, so the final link step always fails in an Emscripten
+    # 3.x environment.  All per-file compilation rules complete before the
+    # linker is invoked, so every .o we need is on disk — allow the error.
+    cmake --build "$build" -j"$(nproc 2>/dev/null || echo 4)" 2>&1 || true
+
+    # Pack every compiled object into a static archive that link_core can use.
+    local archive="$src/mgba_libretro_emscripten.a"
+    local objects
+    mapfile -t objects < <(find "$build" -name "*.o" \
+        -not -path "*/CMakeFiles/CMakeTmp/*" | sort)
+    [[ ${#objects[@]} -gt 0 ]] || \
+        die "mgba: no .o files found after cmake build — check cmake output above"
+
+    info "Archiving ${#objects[@]} mGBA object(s) with emar…"
+    rm -f "$archive"
+    emar rcs "$archive" "${objects[@]}"
+    [[ -f "$archive" ]] || die "mgba: emar archive step failed"
 }
 
 # ── Link to JS + WASM ─────────────────────────────────────────────────────────
