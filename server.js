@@ -56,7 +56,7 @@ app.get('/api/cores', (req, res) => {
       const dir = path.join(coresDir, name);
       let meta = {};
       try { meta = JSON.parse(fs.readFileSync(path.join(dir, 'core.json'), 'utf8')); } catch {}
-      const base = `${req.protocol}://${req.get('host')}`;
+      const base = `https://${req.get('host')}`;
       return {
         id:      name,
         name:    meta.name   ?? name,
