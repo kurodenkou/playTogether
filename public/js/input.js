@@ -100,8 +100,8 @@ class InputManager {
         // Face buttons (full SNES mapping)
         if (btn[0]?.pressed)  bits |= InputBits.A;   // A / Cross
         if (btn[1]?.pressed)  bits |= InputBits.B;   // B / Circle
-        if (btn[2]?.pressed)  bits |= InputBits.X;   // X / Square  (SNES X)
-        if (btn[3]?.pressed)  bits |= InputBits.Y;   // Y / Triangle (SNES Y)
+        if (btn[2]?.pressed)  bits |= InputBits.Y;   // Y / Triangle (SNES Y)
+        if (btn[3]?.pressed)  bits |= InputBits.X;   // X / Square  (SNES X)
         // Shoulder buttons
         if (btn[4]?.pressed)  bits |= InputBits.L;   // LB / L1 (SNES L)
         if (btn[5]?.pressed)  bits |= InputBits.R;   // RB / R1 (SNES R)
@@ -112,8 +112,8 @@ class InputManager {
         // ── Non-standard fallback — face buttons by common convention ──────
         if (btn[0]?.pressed)                    bits |= InputBits.A;
         if (btn[1]?.pressed)                    bits |= InputBits.B;
-        if (btn[2]?.pressed)                    bits |= InputBits.X;
-        if (btn[3]?.pressed)                    bits |= InputBits.Y;
+        if (btn[2]?.pressed)                    bits |= InputBits.Y;
+        if (btn[3]?.pressed)                    bits |= InputBits.X;
         if (btn[4]?.pressed)                    bits |= InputBits.L;
         if (btn[5]?.pressed)                    bits |= InputBits.R;
         if (btn[8]?.pressed || btn[6]?.pressed) bits |= InputBits.SELECT;
