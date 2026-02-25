@@ -518,6 +518,9 @@ function stopGame() {
   inputMgr?.destroy();
   inputMgr = null;
   clearStatsHUD();
+  // Clear libretro core globals so the next loadCore() starts from a clean slate.
+  delete window.Module;
+  delete window.LibretroCore;
 }
 
 // ── HUD ───────────────────────────────────────────────────────────────────────
