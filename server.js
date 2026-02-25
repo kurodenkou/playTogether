@@ -56,12 +56,13 @@ app.get('/api/cores', (_req, res) => {
       const dir = path.join(coresDir, name);
       let meta = {};
       try { meta = JSON.parse(fs.readFileSync(path.join(dir, 'core.json'), 'utf8')); } catch {}
+      const base = `${req.protocol}://${req.get('host')}`;
       return {
         id:      name,
         name:    meta.name   ?? name,
         system:  meta.system ?? 'unknown',
-        jsUrl:   `/cores/${name}/core.js`,
-        wasmUrl: fs.existsSync(path.join(dir, 'core.wasm')) ? `/cores/${name}/core.wasm` : null,
+        jsUrl:   `${base}/cores/${name}/core.js`,
+        wasmUrl: fs.existsSync(path.join(dir, 'core.wasm')) ? `${base}/cores/${name}/core.wasm` : null,
       };
     })
     .sort((a, b) => a.name.localeCompare(b.name));
