@@ -70,7 +70,7 @@ CORE_BUILD[nestopia]="make"
 CORE_REPO[gambatte]="https://github.com/libretro/gambatte-libretro.git"
 CORE_NAME[gambatte]="Gambatte (GB / GBC)"
 CORE_SYSTEM[gambatte]="gb"
-CORE_BUILD[gambatte]="make"
+CORE_BUILD[gambatte]="gambatte"
 
 CORE_REPO[mgba]="https://github.com/libretro/mgba.git"
 CORE_NAME[mgba]="mGBA (GBA / GB / GBC)"
@@ -287,6 +287,40 @@ JSON
     ok "       public/cores/$id/core.wasm ($(du -sh "$out/core.wasm" | cut -f1))"
 }
 
+# ── Build gambatte (libretro-common gated on STATIC_LINKING != 1) ─────────────
+# Makefile.common only compiles libretro-common sources (filestream, file_path,
+# compat_strl, stdstring, vfs_implementation, …) when STATIC_LINKING != 1.
+# But Makefile.libretro sets STATIC_LINKING = 1 for platform=emscripten, so the
+# archive ends up missing those symbols.
+#
+# Fix: pass STATIC_LINKING=0 on the command line to override the Makefile and
+# compile every source including libretro-common.  The final link step will fail
+# (emscripten shared-lib flags are wrong), but all *.o files are already on disk.
+# We then archive them ourselves with emar.
+
+build_gambatte() {
+    local src="$SRC_DIR/gambatte"
+    local archive="$src/gambatte_libretro_emscripten.a"
+
+    info "Building gambatte: emmake STATIC_LINKING=0 (compile all) + emar archive…"
+    emmake make -C "$src" -f Makefile.libretro platform=emscripten \
+        STATIC_LINKING=0 clean 2>/dev/null || true
+
+    emmake make -C "$src" -f Makefile.libretro platform=emscripten \
+        STATIC_LINKING=0 -j"$(nproc 2>/dev/null || echo 4)" 2>&1 || true
+
+    local objects
+    mapfile -t objects < <(find "$src" -name "*.o" \
+        -not -path "*/node_modules/*" | sort)
+    [[ ${#objects[@]} -gt 0 ]] || \
+        die "gambatte: no .o files found — did the compilation step fail?"
+
+    info "Archiving ${#objects[@]} gambatte object(s) with emar…"
+    rm -f "$archive"
+    emar rcs "$archive" "${objects[@]}"
+    [[ -f "$archive" ]] || die "gambatte: emar archive step failed"
+}
+
 # ── Build gearboy (Emscripten 3.x compat) ─────────────────────────────────────
 # Gearboy's platforms/libretro/Makefile links with `em++ --relocatable` to
 # produce a .bc side-module.  Newer wasm-ld rejects --relocatable entirely.
@@ -335,6 +369,9 @@ build_core() {
                 mgba) build_cmake_mgba ;;
                 *)    die "No cmake build handler for '$id'" ;;
             esac
+            ;;
+        gambatte)
+            build_gambatte
             ;;
         gearboy)
             build_gearboy
