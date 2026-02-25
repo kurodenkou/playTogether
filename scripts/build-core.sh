@@ -80,7 +80,7 @@ CORE_BUILD[mgba]="cmake"
 CORE_REPO[genesis_plus_gx]="https://github.com/libretro/Genesis-Plus-GX.git"
 CORE_NAME[genesis_plus_gx]="Genesis Plus GX (MD / SMS / GG)"
 CORE_SYSTEM[genesis_plus_gx]="megadrive"
-CORE_BUILD[genesis_plus_gx]="make"
+CORE_BUILD[genesis_plus_gx]="make_static_override"
 
 CORE_REPO[picodrive]="https://github.com/libretro/picodrive.git"
 CORE_NAME[picodrive]="PicoDrive (MD / 32X / CD)"
