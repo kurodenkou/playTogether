@@ -405,6 +405,7 @@ class LibretroAdapter {
     if (width !== this._width || height !== this._height) this._resize(width, height);
 
     const buf = this._frameBuffer;
+    if (!buf) return;  // resize failed or ROM not yet loaded
     const M   = this.M;
     const PF  = LibretroAdapter.PIXEL_FORMAT;
 
@@ -464,12 +465,16 @@ class LibretroAdapter {
 
   /** Resize the canvas and reallocate the pixel buffers. */
   _resize(width, height) {
+    if (width <= 0 || height <= 0) return;
+    // Create ImageData first; if it throws (invalid dimensions) leave existing
+    // state intact so subsequent calls with valid dimensions can still succeed.
+    const imageData = this.ctx.createImageData(width, height);
+    this._imageData   = imageData;
+    this._frameBuffer = new Uint32Array(imageData.data.buffer);
     this._width  = width;
     this._height = height;
     this.canvas.width  = width;
     this.canvas.height = height;
-    this._imageData   = this.ctx.createImageData(width, height);
-    this._frameBuffer = new Uint32Array(this._imageData.data.buffer);
   }
 
   // ── Audio callbacks ──────────────────────────────────────────────────────────
