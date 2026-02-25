@@ -182,6 +182,19 @@ find_library() {
            -o -name "*_libretro_emscripten*.bc" -o -name "*_libretro_emscripten*.a" \) \
         -not -path "*/node_modules/*" \
         | sort | head -1)
+    [[ -z "$f" ]] && { echo ""; return; }
+
+    # Some Makefiles (e.g. beetle_pce_fast) produce an ar static archive but
+    # mis-name it *.bc.  emcc uses the extension to decide how to parse the
+    # input: a .bc file is fed to clang as LLVM bitcode, so it fails with
+    # "expected integer" when the real content starts with "!<arch>".
+    # Detect this mismatch and rename to .a so emcc treats it as an archive.
+    if [[ "$f" == *.bc ]] && head -c 7 "$f" 2>/dev/null | grep -q '^!<arch>'; then
+        local fixed="${f%.bc}.a"
+        mv "$f" "$fixed"
+        f="$fixed"
+    fi
+
     echo "$f"
 }
 
