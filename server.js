@@ -39,7 +39,7 @@ app.get('/js/snes9x.js', (_req, res) =>
 // Each core directory must contain core.js (and optionally core.wasm + core.json).
 // The UI dropdown calls this endpoint to populate the "Installed core" selector.
 
-app.get('/api/cores', (_req, res) => {
+app.get('/api/cores', (req, res) => {
   const coresDir = path.join(__dirname, 'public', 'cores');
   if (!fs.existsSync(coresDir)) return res.json([]);
 
