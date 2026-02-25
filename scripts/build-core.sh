@@ -70,7 +70,7 @@ CORE_BUILD[nestopia]="make"
 CORE_REPO[gambatte]="https://github.com/libretro/gambatte-libretro.git"
 CORE_NAME[gambatte]="Gambatte (GB / GBC)"
 CORE_SYSTEM[gambatte]="gb"
-CORE_BUILD[gambatte]="gambatte"
+CORE_BUILD[gambatte]="make_static_override"
 
 CORE_REPO[mgba]="https://github.com/libretro/mgba.git"
 CORE_NAME[mgba]="mGBA (GBA / GB / GBC)"
@@ -95,7 +95,7 @@ CORE_BUILD[snes9x2005]="make"
 CORE_REPO[beetle_pce_fast]="https://github.com/libretro/beetle-pce-fast-libretro.git"
 CORE_NAME[beetle_pce_fast]="Beetle PCE Fast (PC Engine)"
 CORE_SYSTEM[beetle_pce_fast]="pce"
-CORE_BUILD[beetle_pce_fast]="make"
+CORE_BUILD[beetle_pce_fast]="make_static_override"
 
 CORE_REPO[gearboy]="https://github.com/libretro/gearboy.git"
 CORE_NAME[gearboy]="Gearboy (GB / GBC)"
@@ -287,38 +287,42 @@ JSON
     ok "       public/cores/$id/core.wasm ($(du -sh "$out/core.wasm" | cut -f1))"
 }
 
-# ── Build gambatte (libretro-common gated on STATIC_LINKING != 1) ─────────────
-# Makefile.common only compiles libretro-common sources (filestream, file_path,
-# compat_strl, stdstring, vfs_implementation, …) when STATIC_LINKING != 1.
-# But Makefile.libretro sets STATIC_LINKING = 1 for platform=emscripten, so the
-# archive ends up missing those symbols.
+# ── Build cores where libretro-common is gated on STATIC_LINKING != 1 ──────────
+# Several cores (gambatte, beetle_pce_fast, …) wrap their libretro-common
+# sources in `ifneq ($(STATIC_LINKING), 1)` inside Makefile.common, but
+# Makefile.libretro sets STATIC_LINKING = 1 for platform=emscripten, so the
+# archive ends up missing filestream, file_path, compat_strl, stdstring, etc.
 #
 # Fix: pass STATIC_LINKING=0 on the command line to override the Makefile and
 # compile every source including libretro-common.  The final link step will fail
-# (emscripten shared-lib flags are wrong), but all *.o files are already on disk.
+# (emscripten shared-lib flags are wrong), but all *.o files are on disk.
 # We then archive them ourselves with emar.
 
-build_gambatte() {
-    local src="$SRC_DIR/gambatte"
-    local archive="$src/gambatte_libretro_emscripten.a"
+build_make_static_override() {
+    local id="$1"
+    local src="$SRC_DIR/$id"
+    local subdir="${CORE_MAKEDIR[$id]:-}"
+    local makefile="${CORE_MAKEFILE[$id]:-Makefile}"
+    local builddir="$src${subdir:+/$subdir}"
+    local archive="$src/${id}_libretro_emscripten.a"
 
-    info "Building gambatte: emmake STATIC_LINKING=0 (compile all) + emar archive…"
-    emmake make -C "$src" -f Makefile.libretro platform=emscripten \
+    info "Building $id: emmake STATIC_LINKING=0 (compile all) + emar archive…"
+    emmake make -C "$builddir" -f "$makefile" platform=emscripten \
         STATIC_LINKING=0 clean 2>/dev/null || true
 
-    emmake make -C "$src" -f Makefile.libretro platform=emscripten \
+    emmake make -C "$builddir" -f "$makefile" platform=emscripten \
         STATIC_LINKING=0 -j"$(nproc 2>/dev/null || echo 4)" 2>&1 || true
 
     local objects
     mapfile -t objects < <(find "$src" -name "*.o" \
         -not -path "*/node_modules/*" | sort)
     [[ ${#objects[@]} -gt 0 ]] || \
-        die "gambatte: no .o files found — did the compilation step fail?"
+        die "$id: no .o files found — did the compilation step fail?"
 
-    info "Archiving ${#objects[@]} gambatte object(s) with emar…"
+    info "Archiving ${#objects[@]} $id object(s) with emar…"
     rm -f "$archive"
     emar rcs "$archive" "${objects[@]}"
-    [[ -f "$archive" ]] || die "gambatte: emar archive step failed"
+    [[ -f "$archive" ]] || die "$id: emar archive step failed"
 }
 
 # ── Build gearboy (Emscripten 3.x compat) ─────────────────────────────────────
@@ -370,8 +374,8 @@ build_core() {
                 *)    die "No cmake build handler for '$id'" ;;
             esac
             ;;
-        gambatte)
-            build_gambatte
+        make_static_override)
+            build_make_static_override "$id"
             ;;
         gearboy)
             build_gearboy
