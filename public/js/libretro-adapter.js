@@ -119,7 +119,12 @@ class LibretroAdapter {
         noInitialRun: true,
         onRuntimeInitialized() {
           clearTimeout(timeout);
-          resolve(modCfg);
+          // Emscripten 3.x may create an internal Module copy rather than
+          // mutating modCfg in-place, so HEAP views (HEAP8/HEAP32/etc.) end up
+          // on that copy.  `this` here is whatever object Emscripten called
+          // onRuntimeInitialized on — i.e. the live, fully-populated Module —
+          // so resolving with it ensures HEAP views are always accessible.
+          resolve(this);
         },
         print:    (msg) => console.log('[libretro]', msg),
         printErr: (msg) => console.warn('[libretro]', msg),

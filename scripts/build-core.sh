@@ -245,6 +245,8 @@ build_cmake_mgba() {
         -DBUILD_QT=OFF \
         -DBUILD_STATIC=ON \
         -DUSE_EPOXY=OFF \
+        -DENABLE_SCRIPTING=OFF \
+        -DUSE_LUA=OFF \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_C_FLAGS="-D_GNU_SOURCE -include $compat_h" \
         -DCMAKE_CXX_FLAGS="-D_GNU_SOURCE -include $compat_h"
@@ -282,7 +284,7 @@ link_core() {
         -s MODULARIZE=0 \
         -s ENVIRONMENT=web \
         -s DISABLE_EXCEPTION_CATCHING=1 \
-        -s EXPORTED_RUNTIME_METHODS='["addFunction","UTF8ToString"]' \
+        -s EXPORTED_RUNTIME_METHODS='["addFunction","UTF8ToString","HEAP8","HEAP16","HEAP32","HEAPU8","HEAPU16","HEAPU32","HEAPF32","HEAPF64"]' \
         -s "EXPORTED_FUNCTIONS=$EXPORTED_FN" \
         "$em_libz"
 
