@@ -112,19 +112,69 @@ class LibretroAdapter {
         30_000
       );
 
+      // ── Capture WebAssembly.Memory before the module script runs ─────────────
+      // Emscripten always creates the wasm linear memory on the JS side and
+      // passes it as an import.  Cores built without EXPORTED_RUNTIME_METHODS
+      // that include HEAP views (HEAPU8, HEAP32, etc.) will have all those
+      // properties undefined on the Module object.  We temporarily wrap the two
+      // WebAssembly instantiation entry-points to observe the import object and
+      // grab the Memory before it disappears into Emscripten's closure.
+      let _capturedMem       = null;
+      const _origInst        = WebAssembly.instantiate;
+      const _origInstS       = WebAssembly.instantiateStreaming;
+      const _restoreWA       = () => {
+        WebAssembly.instantiate          = _origInst;
+        WebAssembly.instantiateStreaming = _origInstS;
+      };
+      const _captureMem = (imports) => {
+        if (!_capturedMem && imports) {
+          _capturedMem = imports.env?.memory
+                      ?? imports['wasi_snapshot_preview1']?.memory;
+        }
+      };
+      WebAssembly.instantiate = (source, imports) => {
+        _captureMem(imports);
+        return _origInst.call(WebAssembly, source, imports);
+      };
+      WebAssembly.instantiateStreaming = (source, imports) => {
+        _captureMem(imports);
+        return _origInstS.call(WebAssembly, source, imports);
+      };
+
       // Pre-configure the Emscripten Module before the script runs.
       // Standard Emscripten glue checks for a pre-existing global named 'Module'
       // (or occasionally the build-configured name); we set both so either works.
       const modCfg = {
         noInitialRun: true,
         onRuntimeInitialized() {
+          _restoreWA();
           clearTimeout(timeout);
-          // Emscripten 3.x may create an internal Module copy rather than
-          // mutating modCfg in-place, so HEAP views (HEAP8/HEAP32/etc.) end up
-          // on that copy.  `this` here is whatever object Emscripten called
-          // onRuntimeInitialized on — i.e. the live, fully-populated Module —
-          // so resolving with it ensures HEAP views are always accessible.
-          resolve(this);
+
+          const live = this;
+
+          // Synthesise any missing HEAP views from the captured WebAssembly.Memory.
+          // The getter pattern keeps views valid after wasm linear-memory growth:
+          // _capturedMem.buffer always returns the current (possibly regrown)
+          // ArrayBuffer, and we re-wrap it in a new TypedArray only when the
+          // buffer object identity changes.
+          if (_capturedMem && !live.HEAPU8) {
+            const cached = {};
+            const getView = (Ctor, key) => {
+              const buf = _capturedMem.buffer;
+              if (!cached[key] || cached[key].buffer !== buf) cached[key] = new Ctor(buf);
+              return cached[key];
+            };
+            Object.defineProperties(live, {
+              HEAPU8:  { get: () => getView(Uint8Array,  'u8'),  configurable: true },
+              HEAPU16: { get: () => getView(Uint16Array, 'u16'), configurable: true },
+              HEAPU32: { get: () => getView(Uint32Array, 'u32'), configurable: true },
+              HEAP8:   { get: () => getView(Int8Array,   'i8'),  configurable: true },
+              HEAP16:  { get: () => getView(Int16Array,  'i16'), configurable: true },
+              HEAP32:  { get: () => getView(Int32Array,  'i32'), configurable: true },
+            });
+          }
+
+          resolve(live);
         },
         print:    (msg) => console.log('[libretro]', msg),
         printErr: (msg) => console.warn('[libretro]', msg),
@@ -153,6 +203,7 @@ class LibretroAdapter {
         const blobUrl = URL.createObjectURL(blob);
         const script  = document.createElement('script');
         script.onerror = () => {
+          _restoreWA();
           clearTimeout(timeout);
           URL.revokeObjectURL(blobUrl);
           reject(new Error('Core script failed to execute — check browser console for details'));
@@ -161,6 +212,7 @@ class LibretroAdapter {
         script.src = blobUrl;
         document.head.appendChild(script);
       } catch (err) {
+        _restoreWA();
         clearTimeout(timeout);
         reject(err);
       }
