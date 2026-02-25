@@ -262,7 +262,8 @@ link_core() {
         -s ENVIRONMENT=web \
         -s DISABLE_EXCEPTION_CATCHING=1 \
         -s EXPORTED_RUNTIME_METHODS='["addFunction","UTF8ToString"]' \
-        -s "EXPORTED_FUNCTIONS=$EXPORTED_FN"
+        -s "EXPORTED_FUNCTIONS=$EXPORTED_FN" \
+        -lz
 
     # Write metadata consumed by GET /api/cores and the UI dropdown.
     cat > "$out/core.json" <<JSON
