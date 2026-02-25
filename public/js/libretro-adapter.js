@@ -323,7 +323,7 @@ class LibretroAdapter {
     switch (cmd) {
       case ENV.SET_PIXEL_FORMAT:
         // Core declares its output pixel format before rendering begins.
-        this._pixelFormat = M.HEAP32[data >> 2];
+        this._pixelFormat = M.HEAPU32[data >> 2];
         return true;
 
       case ENV.GET_CAN_DUPE:
@@ -335,13 +335,13 @@ class LibretroAdapter {
       case ENV.GET_SYSTEM_DIRECTORY:
       case ENV.GET_SAVE_DIRECTORY:
         // Return NULL pointer — no persistent filesystem is available in the browser.
-        M.HEAP32[data >> 2] = 0;
+        M.HEAPU32[data >> 2] = 0;
         return true;
 
       case ENV.GET_VARIABLE:
         // The core is asking for a configuration variable value.
         // Return NULL to instruct the core to use its built-in default.
-        M.HEAP32[(data + 4) >> 2] = 0;
+        M.HEAPU32[(data + 4) >> 2] = 0;
         return false;
 
       case ENV.SET_GEOMETRY: {
@@ -363,7 +363,7 @@ class LibretroAdapter {
             (_level, fmtPtr) => console.log('[libretro core]', M.UTF8ToString(fmtPtr)),
             'vii');
         }
-        M.HEAP32[data >> 2] = this._callbacks.log;
+        M.HEAPU32[data >> 2] = this._callbacks.log;
         return true;
       }
 
@@ -481,23 +481,25 @@ class LibretroAdapter {
 
   _onAudioBatch(dataPtr, frames) {
     if (!this._audioMuted && this._workletNode && frames > 0) {
-      // this.M.HEAP16 is the signed 16-bit view; dataPtr >> 1 converts byte
-      // offset to HEAP16 index.
-      this._flushSamples(this.M.HEAP16, frames, dataPtr >> 1);
+      // HEAPU16 is the unsigned 16-bit view; _flushSamples sign-extends each
+      // sample via (raw << 16) >> 16 so negative values are handled correctly.
+      this._flushSamples(this.M.HEAPU16, frames, dataPtr >> 1);
     }
     return frames;
   }
 
   /**
    * Convert int16 interleaved stereo samples to Float32 and post to the worklet.
-   * @param {Int16Array} src    source buffer (HEAP16 or _singleSampleBuf)
-   * @param {number}     frames number of stereo sample pairs to convert
-   * @param {number}     [offset=0]  index offset into src (for HEAP16 slice)
+   * @param {Uint16Array|Int16Array} src    source buffer (HEAPU16 or _singleSampleBuf)
+   * @param {number}                 frames number of stereo sample pairs to convert
+   * @param {number}                 [offset=0]  index offset into src
    */
   _flushSamples(src, frames, offset = 0) {
     if (!this._workletNode) return;
     const f32 = new Float32Array(frames * 2);
-    for (let i = 0; i < frames * 2; i++) f32[i] = src[offset + i] / 32768.0;
+    // (raw << 16) >> 16 reinterprets a Uint16 bit-pattern as signed int16;
+    // it is a no-op for Int16Array values already in [-32768, 32767].
+    for (let i = 0; i < frames * 2; i++) f32[i] = ((src[offset + i] << 16) >> 16) / 32768.0;
     if (this._audioCtx?.state === 'suspended') this._audioCtx.resume();
     this._workletNode.port.postMessage({ samples: f32 }, [f32.buffer]);
   }
@@ -587,10 +589,10 @@ class LibretroAdapter {
       M._free(romPtr);
       throw new Error('WASM heap exhausted allocating retro_game_info struct');
     }
-    M.HEAP32[(infoPtr     ) >> 2] = 0;             // path = NULL (use raw bytes)
-    M.HEAP32[(infoPtr +  4) >> 2] = romPtr;         // data pointer
-    M.HEAP32[(infoPtr +  8) >> 2] = buf.byteLength; // size
-    M.HEAP32[(infoPtr + 12) >> 2] = 0;             // meta = NULL
+    M.HEAPU32[(infoPtr     ) >> 2] = 0;             // path = NULL (use raw bytes)
+    M.HEAPU32[(infoPtr +  4) >> 2] = romPtr;         // data pointer
+    M.HEAPU32[(infoPtr +  8) >> 2] = buf.byteLength; // size
+    M.HEAPU32[(infoPtr + 12) >> 2] = 0;             // meta = NULL
 
     const ok = M._retro_load_game(infoPtr);
     M._free(infoPtr);
