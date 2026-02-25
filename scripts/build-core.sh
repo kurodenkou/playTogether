@@ -245,6 +245,8 @@ build_cmake_mgba() {
         -DBUILD_QT=OFF \
         -DBUILD_STATIC=ON \
         -DUSE_EPOXY=OFF \
+        -DENABLE_SCRIPTING=OFF \
+        -DUSE_LUA=OFF \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_C_FLAGS="-D_GNU_SOURCE -include $compat_h" \
         -DCMAKE_CXX_FLAGS="-D_GNU_SOURCE -include $compat_h"
