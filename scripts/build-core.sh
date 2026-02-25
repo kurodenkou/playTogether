@@ -251,6 +251,12 @@ link_core() {
     mkdir -p "$out"
     info "Linking $id → public/cores/$id/core.js …"
 
+    # Resolve Emscripten's bundled libz.a by full path so wasm-ld finds it
+    # regardless of flag ordering (emcc puts user -l flags before the sysroot
+    # -L paths in the final wasm-ld invocation, which breaks plain -lz).
+    local em_libz
+    em_libz="$(em-config CACHE)/sysroot/lib/wasm32-emscripten/libz.a"
+
     emcc "$bc" -o "$out/core.js" \
         -O2 \
         --no-entry \
@@ -263,7 +269,7 @@ link_core() {
         -s DISABLE_EXCEPTION_CATCHING=1 \
         -s EXPORTED_RUNTIME_METHODS='["addFunction","UTF8ToString"]' \
         -s "EXPORTED_FUNCTIONS=$EXPORTED_FN" \
-        -lz
+        "$em_libz"
 
     # Write metadata consumed by GET /api/cores and the UI dropdown.
     cat > "$out/core.json" <<JSON
