@@ -237,8 +237,15 @@ build_cmake_mgba() {
     # emcmake sets CMAKE_TOOLCHAIN_FILE and all Emscripten env vars
     # automatically.  Locating the toolchain file by path is fragile across
     # Emscripten versions (the cmake/ tree moved in 3.x).
+    #
+    # BUILD_LIBRETRO is intentionally OFF: when ON, mGBA's cmake declares an
+    # add_library(mgba_libretro SHARED ...) target which wasm-ld 3.x rejects.
+    # Whether BUILD_LIBRETRO=ON is even respected varies across mGBA fork
+    # revisions (some forks reset it to OFF when EMSCRIPTEN is detected).
+    # We bypass all of this by compiling src/platform/libretro/libretro.c
+    # explicitly with emcc in the step below.
     emcmake cmake -S "$src" -B "$build" \
-        -DBUILD_LIBRETRO=ON \
+        -DBUILD_LIBRETRO=OFF \
         -DBUILD_SDL=OFF \
         -DBUILD_QT=OFF \
         -DBUILD_STATIC=ON \
@@ -252,13 +259,41 @@ build_cmake_mgba() {
         -DCMAKE_C_FLAGS="-D_GNU_SOURCE -include $compat_h" \
         -DCMAKE_CXX_FLAGS="-D_GNU_SOURCE -include $compat_h"
 
-    # mGBA's libretro CMake target is declared SHARED.  wasm-ld ≥ 3.x rejects
-    # the --shared flag, so the final link step always fails in an Emscripten
-    # 3.x environment.  All per-file compilation rules complete before the
-    # linker is invoked, so every .o we need is on disk — allow the error.
+    # Build the mGBA core library.  With all frontends disabled the only
+    # target is the static 'mgba' archive.  Allow failure from any stray target.
     cmake --build "$build" -j"$(nproc 2>/dev/null || echo 4)" 2>&1 || true
 
-    # Pack every compiled object into a static archive that link_core can use.
+    # ── Compile the libretro frontend glue explicitly ─────────────────────────
+    # cmake configure (above) generates headers (mgba-version.h, config.h …)
+    # into $build and $build/include/ that libretro.c needs via -I.
+    # libretro.h may live next to libretro.c or inside a third-party tree.
+    local libretro_c="$src/src/platform/libretro/libretro.c"
+    [[ -f "$libretro_c" ]] || \
+        die "mgba: src/platform/libretro/libretro.c not found — check clone"
+
+    local libretro_h_dirs=()
+    for candidate in \
+            "$src/src/platform/libretro" \
+            "$src/third-party/libretro-common/include" \
+            "$src/libretro-common/include"; do
+        [[ -d "$candidate" ]] && libretro_h_dirs+=("-I$candidate")
+    done
+
+    info "Compiling mGBA libretro interface (libretro.c)…"
+    local libretro_o="$build/libretro_glue.o"
+    emcc -c "$libretro_c" \
+        -I"$src/include" \
+        -I"$src/src" \
+        -I"$build" \
+        -I"$build/include" \
+        "${libretro_h_dirs[@]}" \
+        -D_GNU_SOURCE \
+        -D__LIBRETRO__ \
+        -O2 \
+        -o "$libretro_o" \
+        || die "mgba: libretro.c compilation failed — check include errors above"
+
+    # Pack every compiled object (core + libretro glue) into a static archive.
     local archive="$src/mgba_libretro_emscripten.a"
     local objects
     mapfile -t objects < <(find "$build" -name "*.o" \
