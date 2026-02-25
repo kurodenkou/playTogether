@@ -423,26 +423,11 @@ class LibretroAdapter {
         return true;
       }
 
-      case ENV.GET_LOG_INTERFACE: {
-        // Provide a minimal logging function so cores that require it don't crash.
-        // retro_log_callback holds a single function pointer.
-        // We declare the signature as (int level, const char* fmt) — variadic args
-        // beyond the format string are ignored, which is safe for debug logging.
-        if (!this._callbacks.log) {
-          this._callbacks.log = this._addFn(
-            (_level, fmtPtr) => console.log('[libretro core]', M.UTF8ToString(fmtPtr)),
-            'vii');
-        }
-        M.HEAPU32[data >> 2] = this._callbacks.log;
-        return true;
-      }
-
       // Silently acknowledge commands that need no action from our frontend.
       case ENV.SET_PERFORMANCE_LEVEL:
       case ENV.SET_VARIABLES:
       case ENV.GET_VARIABLE_UPDATE:
       case ENV.SET_SUPPORT_NO_GAME:
-      case ENV.GET_PERF_INTERFACE:
       case ENV.GET_USERNAME:
       case ENV.GET_LANGUAGE:
       case ENV.SET_CORE_OPTIONS:
