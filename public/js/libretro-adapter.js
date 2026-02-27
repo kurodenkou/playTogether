@@ -112,14 +112,19 @@ class LibretroAdapter {
         30_000
       );
 
-      // ── Capture WebAssembly.Memory before the module script runs ─────────────
+      // ── Capture WebAssembly.Memory and function table before module runs ─────
       // Emscripten always creates the wasm linear memory on the JS side and
       // passes it as an import.  Cores built without EXPORTED_RUNTIME_METHODS
       // that include HEAP views (HEAPU8, HEAP32, etc.) will have all those
       // properties undefined on the Module object.  We temporarily wrap the two
       // WebAssembly instantiation entry-points to observe the import object and
       // grab the Memory before it disappears into Emscripten's closure.
+      //
+      // We also capture the WebAssembly.Table from the instance exports so that
+      // cores compiled without ALLOW_TABLE_GROWTH=1 / addFunction can still have
+      // JS callbacks registered via the direct table-manipulation path in _addFn.
       let _capturedMem       = null;
+      let _capturedTable     = null;
       const _origInst        = WebAssembly.instantiate;
       const _origInstS       = WebAssembly.instantiateStreaming;
       const _restoreWA       = () => {
@@ -132,13 +137,26 @@ class LibretroAdapter {
                       ?? imports['wasi_snapshot_preview1']?.memory;
         }
       };
+      const _captureTable = (exports) => {
+        if (!_capturedTable && exports) {
+          _capturedTable = exports.__indirect_function_table
+                        ?? exports.table
+                        ?? null;
+        }
+      };
       WebAssembly.instantiate = (source, imports) => {
         _captureMem(imports);
-        return _origInst.call(WebAssembly, source, imports);
+        return _origInst.call(WebAssembly, source, imports).then(result => {
+          _captureTable(result?.instance?.exports);
+          return result;
+        });
       };
       WebAssembly.instantiateStreaming = (source, imports) => {
         _captureMem(imports);
-        return _origInstS.call(WebAssembly, source, imports);
+        return _origInstS.call(WebAssembly, source, imports).then(result => {
+          _captureTable(result?.instance?.exports);
+          return result;
+        });
       };
 
       // Pre-configure the Emscripten Module before the script runs.
@@ -172,6 +190,14 @@ class LibretroAdapter {
               HEAP16:  { get: () => getView(Int16Array,  'i16'), configurable: true },
               HEAP32:  { get: () => getView(Int32Array,  'i32'), configurable: true },
             });
+          }
+
+          // Attach the captured function table if the module doesn't expose one.
+          // Cores compiled without ALLOW_TABLE_GROWTH=1 / addFunction won't set
+          // Module.wasmTable or Module.__indirect_function_table themselves, but
+          // the table is always present as a wasm export and we captured it above.
+          if (_capturedTable && !live.wasmTable && !live.__indirect_function_table) {
+            live.__indirect_function_table = _capturedTable;
           }
 
           resolve(live);
