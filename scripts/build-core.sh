@@ -489,6 +489,46 @@ build_n64wasm() {
     rm -f "$archive"
     emar rcs "$archive" "${objects[@]}"
     [[ -f "$archive" ]] || die "n64wasm: emar archive step failed"
+
+    # Five symbols are referenced by the archive but absent in a
+    # HAVE_DYNAREC=0 + software-only build, causing wasm-ld to abort:
+    #
+    #   glReadBuffer      – OpenGL ES 3.0 function in glsm.c; never reached
+    #                       because the frontend returns false for
+    #                       RETRO_ENVIRONMENT_SET_HW_RENDER.
+    #   sem_timedwait     – POSIX timed semaphore in opengl_Wrapper.c;
+    #                       absent from Emscripten libc; same dead HW-render
+    #                       code path.
+    #   dynarec_jump_to   – JIT entry point in r4300_core.c; compiled in even
+    #   dyna_jump           with HAVE_DYNAREC=0 but never executed when the
+    #   dyna_stop           pure interpreter is active.
+    #
+    # Compile minimal no-op stubs and append them to the archive so wasm-ld
+    # can resolve all symbols without suppressing real undefined-symbol errors.
+    local stubs_c="$src/n64wasm_stubs.c"
+    cat > "$stubs_c" <<'STUBS'
+/* n64wasm_stubs.c — dead-code stubs for a HAVE_DYNAREC=0, SW-render build.
+ * None of these are reachable at runtime:
+ *   - glReadBuffer / sem_timedwait: only live behind SET_HW_RENDER, which
+ *     the JS frontend rejects.
+ *   - dynarec_*: only live when the JIT is active; HAVE_DYNAREC=0 keeps
+ *     execution in the interpreter.
+ */
+#include <stdint.h>
+
+void glReadBuffer(unsigned int mode)                         { (void)mode; }
+int  sem_timedwait(void *sem, const void *abstime)           { (void)sem; (void)abstime; return -1; }
+void dynarec_jump_to(uint32_t addr)                          { (void)addr; }
+void dyna_jump(void)                                         {}
+void dyna_stop(int exc)                                      { (void)exc; }
+STUBS
+
+    local stubs_o="$src/n64wasm_stubs.o"
+    emcc -O2 -c "$stubs_c" -o "$stubs_o" \
+        || die "n64wasm: stub compilation failed"
+    emar r "$archive" "$stubs_o" \
+        || die "n64wasm: failed to add stubs to archive"
+    info "Appended n64wasm stubs (glReadBuffer, sem_timedwait, dynarec symbols)"
 }
 
 # ── Compile one core end-to-end ────────────────────────────────────────────────
