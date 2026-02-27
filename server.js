@@ -35,106 +35,39 @@ app.get('/js/snes9x.js', (_req, res) =>
 );
 
 // ── Installed libretro cores ──────────────────────────────────────────────────
-// Lists cores placed in public/cores/<id>/ by scripts/build-core.sh, merged
-// with any cores listed in a remote JSON manifest (CORES_MANIFEST_URL env var).
-//
-// Remote manifest format — an array of objects, same shape as the API response:
-//   [
-//     {
-//       "id":      "mupen64plus_next",
-//       "name":    "Mupen64Plus-Next (N64)",
-//       "system":  "n64",
-//       "jsUrl":   "https://raw.githubusercontent.com/you/cores/main/mupen64plus_next/core.js",
-//       "wasmUrl": "https://raw.githubusercontent.com/you/cores/main/mupen64plus_next/core.wasm"
-//     }
-//   ]
-//
-// Local cores take precedence: if a remote entry shares an id with a locally-
-// installed core the remote entry is silently dropped.
-//
+// Lists cores placed in public/cores/<id>/ by scripts/build-core.sh.
+// Each core directory must contain core.js (and optionally core.wasm + core.json).
 // The UI dropdown calls this endpoint to populate the "Installed core" selector.
 
-// Simple in-process cache so the upstream fetch doesn't block every page load.
-let _coreManifestCache   = null;
-let _coreManifestFetchTs = 0;
-const CORE_MANIFEST_TTL  = 5 * 60 * 1000; // refresh at most once every 5 minutes
-
-async function fetchRemoteCores() {
-  const url = process.env.CORES_MANIFEST_URL;
-  if (!url) return [];
-
-  const now = Date.now();
-  if (_coreManifestCache && now - _coreManifestFetchTs < CORE_MANIFEST_TTL) {
-    return _coreManifestCache;
-  }
-
-  try {
-    const resp = await fetch(url, {
-      headers: { 'User-Agent': 'playTogether/1.0' },
-      signal:  AbortSignal.timeout(8_000),
-    });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const data = await resp.json();
-    if (!Array.isArray(data)) throw new Error('manifest must be a JSON array');
-
-    // Basic validation: keep only entries with the required URL fields
-    _coreManifestCache = data.filter(c =>
-      c && typeof c.id === 'string' && typeof c.jsUrl === 'string'
-    ).map(c => ({
-      id:      String(c.id),
-      name:    typeof c.name   === 'string' ? c.name   : c.id,
-      system:  typeof c.system === 'string' ? c.system : 'unknown',
-      jsUrl:   String(c.jsUrl),
-      wasmUrl: typeof c.wasmUrl === 'string' ? c.wasmUrl : null,
-    }));
-    _coreManifestFetchTs = now;
-    console.log(`[cores] loaded ${_coreManifestCache.length} remote core(s) from manifest`);
-  } catch (err) {
-    console.warn('[cores] failed to fetch remote manifest:', err.message);
-    // Return stale cache on error rather than breaking the UI
-    if (_coreManifestCache) return _coreManifestCache;
-    return [];
-  }
-  return _coreManifestCache;
-}
-
-app.get('/api/cores', async (req, res) => {
-  // ── Local cores (filesystem) ──────────────────────────────────────────────
+app.get('/api/cores', (req, res) => {
   const coresDir = path.join(__dirname, 'public', 'cores');
-  const localCores = [];
+  if (!fs.existsSync(coresDir)) return res.json([]);
 
-  if (fs.existsSync(coresDir)) {
-    let entries = [];
-    try { entries = fs.readdirSync(coresDir); } catch { /* ignore */ }
+  let entries;
+  try { entries = fs.readdirSync(coresDir); } catch { return res.json([]); }
 
-    const base = `https://${req.get('host')}`;
-    for (const name of entries) {
+  const base = `https://${req.get('host')}`;
+  const cores = entries
+    .filter(name => {
       const dir = path.join(coresDir, name);
-      if (!fs.statSync(dir).isDirectory()) continue;
-      if (!fs.existsSync(path.join(dir, 'core.js'))) continue;
+      return fs.statSync(dir).isDirectory() &&
+             fs.existsSync(path.join(dir, 'core.js'));
+    })
+    .map(name => {
+      const dir = path.join(coresDir, name);
       let meta = {};
       try { meta = JSON.parse(fs.readFileSync(path.join(dir, 'core.json'), 'utf8')); } catch {}
-      localCores.push({
+      return {
         id:      name,
         name:    meta.name   ?? name,
         system:  meta.system ?? 'unknown',
         jsUrl:   `${base}/cores/${name}/core.js`,
         wasmUrl: fs.existsSync(path.join(dir, 'core.wasm')) ? `${base}/cores/${name}/core.wasm` : null,
-      });
-    }
-  }
+      };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
 
-  // ── Remote cores (GitHub manifest) ───────────────────────────────────────
-  const remoteCores = await fetchRemoteCores();
-
-  // Merge: local takes precedence over remote (deduplicate by id)
-  const localIds = new Set(localCores.map(c => c.id));
-  const merged = [
-    ...localCores,
-    ...remoteCores.filter(c => !localIds.has(c.id)),
-  ].sort((a, b) => a.name.localeCompare(b.name));
-
-  res.json(merged);
+  res.json(cores);
 });
 
 // ── ROM proxy ──────────────────────────────────────────────────────────────────
