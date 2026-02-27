@@ -2,8 +2,6 @@ ROMS/
 node_modules/
 package-lock.json
 
-# libretro core build artefacts — git-ignore contents, track the directories via .gitkeep
+# libretro core source checkouts (large, machine-generated)
 scripts/cores-src/*
 !scripts/cores-src/.gitkeep
-public/cores/*
-!public/cores/.gitkeep

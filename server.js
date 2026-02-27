@@ -46,6 +46,7 @@ app.get('/api/cores', (req, res) => {
   let entries;
   try { entries = fs.readdirSync(coresDir); } catch { return res.json([]); }
 
+  const base = `https://${req.get('host')}`;
   const cores = entries
     .filter(name => {
       const dir = path.join(coresDir, name);
@@ -56,7 +57,6 @@ app.get('/api/cores', (req, res) => {
       const dir = path.join(coresDir, name);
       let meta = {};
       try { meta = JSON.parse(fs.readFileSync(path.join(dir, 'core.json'), 'utf8')); } catch {}
-      const base = `https://${req.get('host')}`;
       return {
         id:      name,
         name:    meta.name   ?? name,
@@ -85,7 +85,8 @@ app.get('/api/cores', (req, res) => {
 //     are served instantly without a second upstream fetch.
 //   • Entries are evicted oldest-first when the cache would exceed the limit.
 
-const ROM_CACHE_MAX_BYTES = 64 * 1024 * 1024; // 64 MB total
+const ROM_CACHE_MAX_BYTES  = 256 * 1024 * 1024; // 256 MB total (cores can be 30–50 MB each)
+const ROM_PROXY_MAX_BYTES  =  64 * 1024 * 1024; //  64 MB per file (covers large N64 WASM)
 /** @type {Map<string, {buf: Buffer, size: number, ts: number}>} */
 const romCache = new Map();
 let romCacheTotalBytes = 0;
@@ -144,13 +145,13 @@ app.get('/rom-proxy', async (req, res) => {
     }
 
     const contentLength = Number(upstream.headers.get('content-length') ?? 0);
-    if (contentLength > 16 * 1024 * 1024) {
-      return res.status(413).send('ROM too large (max 16 MB)');
+    if (contentLength > ROM_PROXY_MAX_BYTES) {
+      return res.status(413).send(`File too large (max ${ROM_PROXY_MAX_BYTES / 1024 / 1024} MB)`);
     }
 
     const buffer = await upstream.arrayBuffer();
-    if (buffer.byteLength > 16 * 1024 * 1024) {
-      return res.status(413).send('ROM too large (max 16 MB)');
+    if (buffer.byteLength > ROM_PROXY_MAX_BYTES) {
+      return res.status(413).send(`File too large (max ${ROM_PROXY_MAX_BYTES / 1024 / 1024} MB)`);
     }
 
     const buf = Buffer.from(buffer);
