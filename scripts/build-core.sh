@@ -146,6 +146,15 @@ CORE_MEMORY[n64wasm]="268435456"   # 256 MB
 declare -A CORE_LINK_EXTRA
 CORE_LINK_EXTRA[n64wasm]='-Wl,--export-if-defined=emscripten_GetProcAddress'
 
+# CORE_EXTRA_EXPORTS: additional symbols appended to EXPORTED_FUNCTIONS for
+# specific cores.  Each value is a comma-prefixed JSON fragment so it can be
+# spliced before the closing ']' of EXPORTED_FN.
+# n64wasm: _emscripten_GetProcAddress must appear in EXPORTED_FUNCTIONS so
+# Emscripten's JS glue creates Module._emscripten_GetProcAddress — the JS
+# wrapper that the frontend uses to resolve GL function-table indices.
+declare -A CORE_EXTRA_EXPORTS
+CORE_EXTRA_EXPORTS[n64wasm]=',"_emscripten_GetProcAddress"'
+
 # ── emcc exported functions (standard libretro C API + allocator) ──────────────
 EXPORTED_FN='["_retro_init","_retro_deinit","_retro_get_system_info","_retro_get_system_av_info","_retro_set_environment","_retro_set_video_refresh","_retro_set_input_poll","_retro_set_input_state","_retro_set_audio_sample","_retro_set_audio_sample_batch","_retro_reset","_retro_run","_retro_serialize_size","_retro_serialize","_retro_unserialize","_retro_load_game","_retro_unload_game","_malloc","_free"]'
 
@@ -353,6 +362,11 @@ link_core() {
     local initial_mem="${CORE_MEMORY[$id]:-67108864}"
     local extra_link="${CORE_LINK_EXTRA[$id]:-}"
 
+    # Merge core-specific extra symbols into the EXPORTED_FUNCTIONS JSON array.
+    # CORE_EXTRA_EXPORTS values are comma-prefixed fragments, e.g. ',"_foo"'.
+    local extra_exports="${CORE_EXTRA_EXPORTS[$id]:-}"
+    local efn="${EXPORTED_FN%]}${extra_exports}]"
+
     emcc "$bc" -o "$out/core.js" \
         -O2 \
         --no-entry \
@@ -364,7 +378,7 @@ link_core() {
         -s ENVIRONMENT=web \
         -s DISABLE_EXCEPTION_CATCHING=1 \
         -s EXPORTED_RUNTIME_METHODS='["addFunction","UTF8ToString","HEAP8","HEAP16","HEAP32","HEAPU8","HEAPU16","HEAPU32","HEAPF32","HEAPF64"]' \
-        -s "EXPORTED_FUNCTIONS=$EXPORTED_FN" \
+        -s "EXPORTED_FUNCTIONS=$efn" \
         ${extra_link:+$extra_link} \
         "$em_libz"
 
