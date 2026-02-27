@@ -502,18 +502,53 @@ class LibretroAdapter {
         const fboFn = this._addFn(() => 0, 'i');
         M.HEAPU32[(data +  8) >> 2] = fboFn;
 
-        // get_proc_address: delegate to _emscripten_GetProcAddress when the
-        // symbol is exported (requires -lGL-getprocaddr + explicit export in the
-        // build).  GLideN64 calls rglgen_resolve_symbols() with this callback to
-        // obtain WASM table indices for every GL entry point it uses.
-        // If the symbol is absent we return 0; Emscripten's statically-linked
-        // GL stubs will still be called via direct WASM call instructions.
-        const procFn = this._addFn(
-          typeof M._emscripten_GetProcAddress === 'function'
-            ? (namePtr) => M._emscripten_GetProcAddress(namePtr) | 0
-            : (_namePtr) => 0,
-          'ii',
-        );
+        // get_proc_address: GLideN64 calls rglgen_resolve_symbols() with this
+        // callback to obtain WASM table indices for every GL entry point it uses.
+        // Null (0) pointers cause a "function signature mismatch" WASM trap
+        // on the first indirect call, so we must return real indices.
+        //
+        // Resolution priority:
+        //  1. _emscripten_GetProcAddress (exported after rebuilding with the
+        //     updated build-core.sh that adds --export-if-defined=…).
+        //  2. Module.GL.getProcAddress / getWebGLProcAddress (Emscripten GL
+        //     module internal — present in some Emscripten versions).
+        //  3. Warn and return 0; retro_load_game will trap → rebuild is required.
+        const glProcCache = Object.create(null);
+        const GL = M.GL;
+        // Build a resolver function once, checking capabilities eagerly.
+        const _glProcResolve = (() => {
+          if (typeof M._emscripten_GetProcAddress === 'function') {
+            // Post-rebuild fast path: pass the C string pointer directly.
+            return (namePtr) => M._emscripten_GetProcAddress(namePtr) | 0;
+          }
+          // Try Emscripten GL module internals (JS-string API, varies by version).
+          const glLookup = GL?.getProcAddress?.bind(GL)
+                        ?? GL?.getWebGLProcAddress?.bind(GL)
+                        ?? GL?.procAddressLookup?.bind(GL);
+          if (typeof glLookup === 'function') {
+            return (namePtr) => {
+              const name = M.UTF8ToString(namePtr);
+              if (name in glProcCache) return glProcCache[name];
+              return (glProcCache[name] = glLookup(name) | 0);
+            };
+          }
+          // No resolver available: log once and return 0.
+          // retro_load_game will trap on the first null call_indirect.
+          // Fix: rebuild n64wasm — build-core.sh now exports the symbol.
+          let warned = false;
+          return (namePtr) => {
+            if (!warned) {
+              warned = true;
+              console.error(
+                '[LibretroAdapter] get_proc_address: _emscripten_GetProcAddress is not ' +
+                'exported — GL function pointers will be null and retro_load_game will ' +
+                'crash.  Rebuild the n64wasm core:  scripts/build-core.sh n64wasm'
+              );
+            }
+            return 0;
+          };
+        })();
+        const procFn = this._addFn(_glProcResolve, 'ii');
         M.HEAPU32[(data + 12) >> 2] = procFn;
 
         this._hwRender       = true;
@@ -824,7 +859,22 @@ class LibretroAdapter {
       M.HEAPU32[(infoPtr +  8) >> 2] = buf.byteLength;
       M.HEAPU32[(infoPtr + 12) >> 2] = 0;              // meta = NULL
 
-      ok = M._retro_load_game(infoPtr);
+      try {
+        ok = M._retro_load_game(infoPtr);
+      } catch (wasmErr) {
+        // A WASM RuntimeError here almost always means a null GL function
+        // pointer was call_indirect-ed: rglgen_resolve_symbols() filled the
+        // pointer table with 0s because get_proc_address had no resolver.
+        // Fix: rebuild the core so _emscripten_GetProcAddress is exported.
+        M._free(infoPtr);
+        if (pathPtr) M._free(pathPtr);
+        M._free(romPtr);
+        throw new Error(
+          'retro_load_game() trapped in WASM (' + wasmErr.message + '). ' +
+          'Hardware-rendered N64 cores need _emscripten_GetProcAddress exported — ' +
+          'rebuild:  scripts/build-core.sh n64wasm'
+        );
+      }
       M._free(infoPtr);
       if (pathPtr) M._free(pathPtr);
       M._free(romPtr);
