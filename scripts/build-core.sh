@@ -137,14 +137,24 @@ CORE_MEMORY[n64wasm]="268435456"   # 256 MB
 
 # CORE_LINK_EXTRA: additional emcc/wasm-ld flags appended verbatim to the
 # link_core emcc command for specific cores (space-separated).
-# n64wasm: export emscripten_GetProcAddress so the JS frontend can delegate
-# retro_hw_render_callback.get_proc_address to it.  GLideN64 calls
-# rglgen_resolve_symbols() with this callback to obtain WASM table indices for
-# every GL entry point it uses; without it all function pointers are null and
-# the core traps on the first GL call.
-# --export-if-defined is safe: silently skipped if the symbol is absent.
+#
+# n64wasm: link Emscripten's OpenGL ES 3 library so that:
+#   1. Compiled C wrappers for every GL/GLES3 function (emscripten_glXxx) are
+#      included in the WASM binary and registered in the function table.
+#   2. emscripten_GetProcAddress is compiled in; it maps a GL function name to
+#      the WASM table index of the corresponding emscripten_glXxx wrapper.
+#      GLideN64 calls rglgen_resolve_symbols(get_proc_address) on init; our
+#      JS get_proc_address callback forwards to emscripten_GetProcAddress so
+#      every GL function pointer is resolved to a real, callable table index.
+#      Without this, all pointers stay null and retro_load_game traps.
+#   3. --export-if-defined exports emscripten_GetProcAddress into the WASM
+#      binary's export section so JS can call it as M._wasmExports or via
+#      Module._emscripten_GetProcAddress (when in EXPORTED_FUNCTIONS).
+#
+# USE_WEBGL2 + FULL_ES3 tell the GL library to include GLES3 function wrappers
+# (glDrawBuffers, glReadBuffer, glBlitFramebuffer, etc.) that GLideN64 uses.
 declare -A CORE_LINK_EXTRA
-CORE_LINK_EXTRA[n64wasm]='-Wl,--export-if-defined=emscripten_GetProcAddress'
+CORE_LINK_EXTRA[n64wasm]='-lGL -s USE_WEBGL2=1 -s FULL_ES3=1 -Wl,--export-if-defined=emscripten_GetProcAddress'
 
 # CORE_EXTRA_EXPORTS: additional symbols appended to EXPORTED_FUNCTIONS for
 # specific cores.  Each value is a comma-prefixed JSON fragment so it can be
@@ -517,33 +527,39 @@ build_n64wasm() {
     emar rcs "$archive" "${objects[@]}"
     [[ -f "$archive" ]] || die "n64wasm: emar archive step failed"
 
-    # Five symbols are referenced by the archive but absent in a
-    # HAVE_DYNAREC=0 + software-only build, causing wasm-ld to abort:
+    # Three symbols are referenced by the archive but absent in a
+    # HAVE_DYNAREC=0 build, causing wasm-ld to abort:
     #
-    #   glReadBuffer      – OpenGL ES 3.0 function in glsm.c; never reached
-    #                       because the frontend returns false for
-    #                       RETRO_ENVIRONMENT_SET_HW_RENDER.
-    #   sem_timedwait     – POSIX timed semaphore in opengl_Wrapper.c;
-    #                       absent from Emscripten libc; same dead HW-render
-    #                       code path.
-    #   dynarec_jump_to   – JIT entry point in r4300_core.c; compiled in even
-    #   dyna_jump           with HAVE_DYNAREC=0 but never executed when the
-    #   dyna_stop           pure interpreter is active.
+    #   sem_timedwait  – POSIX timed semaphore used in opengl_Wrapper.c for
+    #                    SW-renderer thread sync; absent from Emscripten libc.
+    #                    The stub returns -1 (error) which is safe — the call
+    #                    site treats a failed timed wait as a no-op timeout.
+    #   dynarec_jump_to – JIT entry point in r4300_core.c; compiled in even
+    #   dyna_jump         with HAVE_DYNAREC=0 but never executed when the
+    #   dyna_stop         pure interpreter is active.
+    #
+    # NOTE: glReadBuffer was previously stubbed here when hardware rendering
+    # was rejected by the JS frontend.  It is now provided by -lGL (which
+    # supplies the real Emscripten GLES3 wrapper) and must NOT be stubbed or
+    # the no-op stub would override the real WebGL implementation.
     #
     # Compile minimal no-op stubs and append them to the archive so wasm-ld
     # can resolve all symbols without suppressing real undefined-symbol errors.
     local stubs_c="$src/n64wasm_stubs.c"
     cat > "$stubs_c" <<'STUBS'
-/* n64wasm_stubs.c — dead-code stubs for a HAVE_DYNAREC=0, SW-render build.
- * None of these are reachable at runtime:
- *   - glReadBuffer / sem_timedwait: only live behind SET_HW_RENDER, which
- *     the JS frontend rejects.
- *   - dynarec_*: only live when the JIT is active; HAVE_DYNAREC=0 keeps
- *     execution in the interpreter.
+/* n64wasm_stubs.c — stubs for symbols absent from Emscripten libc/HAVE_DYNAREC=0.
+ *
+ *   sem_timedwait: POSIX timed semaphore; not in Emscripten libc.
+ *     Returns -1 (error/timeout) which the call site treats as a no-op.
+ *
+ *   dynarec_*: JIT entry points compiled in even with HAVE_DYNAREC=0;
+ *     never executed when the pure interpreter is active.
+ *
+ * glReadBuffer is intentionally NOT stubbed here: -lGL provides the real
+ * Emscripten GLES3 wrapper that forwards to WebGL's readBuffer().
  */
 #include <stdint.h>
 
-void glReadBuffer(unsigned int mode)                         { (void)mode; }
 int  sem_timedwait(void *sem, const void *abstime)           { (void)sem; (void)abstime; return -1; }
 void dynarec_jump_to(uint32_t addr)                          { (void)addr; }
 void dyna_jump(void)                                         {}
@@ -555,7 +571,7 @@ STUBS
         || die "n64wasm: stub compilation failed"
     emar r "$archive" "$stubs_o" \
         || die "n64wasm: failed to add stubs to archive"
-    info "Appended n64wasm stubs (glReadBuffer, sem_timedwait, dynarec symbols)"
+    info "Appended n64wasm stubs (sem_timedwait, dynarec symbols)"
 }
 
 # ── Compile one core end-to-end ────────────────────────────────────────────────
