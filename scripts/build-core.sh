@@ -107,6 +107,11 @@ CORE_NAME[fbalpha2012_cps1]="FB Alpha 2012 CPS-1 (Arcade)"
 CORE_SYSTEM[fbalpha2012_cps1]="arcade"
 CORE_BUILD[fbalpha2012_cps1]="make"
 
+CORE_REPO[n64wasm]="https://github.com/libretro/mupen64plus-libretro-nx.git"
+CORE_NAME[n64wasm]="n64wasm (Nintendo 64)"
+CORE_SYSTEM[n64wasm]="n64"
+CORE_BUILD[n64wasm]="make_static_override"
+
 # ── Per-core Makefile overrides ────────────────────────────────────────────────
 # CORE_MAKEDIR: subdirectory within the cloned repo that contains the Makefile.
 #               Empty = repo root (the default for most cores).
@@ -122,6 +127,13 @@ CORE_MAKEFILE[gambatte]="Makefile.libretro"
 CORE_MAKEFILE[genesis_plus_gx]="Makefile.libretro"
 CORE_MAKEFILE[picodrive]="Makefile.libretro"
 CORE_MAKEFILE[fbalpha2012_cps1]="makefile.libretro"  # note lowercase 'm'
+
+# CORE_MEMORY: INITIAL_MEMORY (bytes) passed to emcc for each core.
+# Default is 64 MB (67108864). N64 cores need a larger initial heap because
+# the emulated system itself has 4–8 MB RAM plus plugin buffers; 256 MB gives
+# comfortable headroom for the mupen64plus dynarec and texture cache.
+declare -A CORE_MEMORY
+CORE_MEMORY[n64wasm]="268435456"   # 256 MB
 
 # ── emcc exported functions (standard libretro C API + allocator) ──────────────
 EXPORTED_FN='["_retro_init","_retro_deinit","_retro_get_system_info","_retro_get_system_av_info","_retro_set_environment","_retro_set_video_refresh","_retro_set_input_poll","_retro_set_input_state","_retro_set_audio_sample","_retro_set_audio_sample_batch","_retro_reset","_retro_run","_retro_serialize_size","_retro_serialize","_retro_unserialize","_retro_load_game","_retro_unload_game","_malloc","_free"]'
@@ -327,13 +339,15 @@ link_core() {
     local em_libz
     em_libz="$(em-config CACHE)/sysroot/lib/wasm32-emscripten/libz.a"
 
+    local initial_mem="${CORE_MEMORY[$id]:-67108864}"
+
     emcc "$bc" -o "$out/core.js" \
         -O2 \
         --no-entry \
         -s WASM=1 \
         -s ALLOW_TABLE_GROWTH=1 \
         -s ALLOW_MEMORY_GROWTH=1 \
-        -s INITIAL_MEMORY=67108864 \
+        -s "INITIAL_MEMORY=$initial_mem" \
         -s MODULARIZE=0 \
         -s ENVIRONMENT=web \
         -s DISABLE_EXCEPTION_CATCHING=1 \
