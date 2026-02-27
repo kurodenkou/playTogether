@@ -651,7 +651,8 @@ class LibretroAdapter {
     if (!resp.ok) {
       throw new Error(`ROM fetch failed: HTTP ${resp.status} — ${resp.statusText}`);
     }
-    const buf = await resp.arrayBuffer();
+    const rawBuf = await resp.arrayBuffer();
+    const buf    = LibretroAdapter._normalizeN64Rom(rawBuf);
 
     await this._initAudio();
 
@@ -846,5 +847,50 @@ class LibretroAdapter {
     if (!this._dirty || !this._imageData) return;
     this.ctx.putImageData(this._imageData, 0, 0);
     this._dirty = false;
+  }
+
+  /**
+   * N64 ROMs are distributed in three byte-order variants.
+   * mupen64plus-next (n64wasm) requires big-endian / .z64 layout — first word
+   * must be 0x80371240.  Silently normalise .v64 and .n64 images so the core
+   * never sees a mis-ordered ROM.  Buffers whose first word does not match any
+   * N64 magic are returned unchanged (no-op for every other system).
+   *
+   * Format detection:
+   *   .z64  big-endian (native)  80 37 12 40  — no conversion needed
+   *   .v64  word-swapped         37 80 40 12  — swap each adjacent byte pair
+   *   .n64  little-endian        40 12 37 80  — reverse each 4-byte group
+   *
+   * @param {ArrayBuffer} buf
+   * @returns {ArrayBuffer}
+   */
+  static _normalizeN64Rom(buf) {
+    if (buf.byteLength < 4) return buf;
+    const magic = new DataView(buf).getUint32(0, false /* big-endian */);
+
+    // Already .z64 — nothing to do.
+    if (magic === 0x80371240) return buf;
+
+    const out = new Uint8Array(buf.slice(0));
+
+    if (magic === 0x37804012) {
+      // .v64: swap every adjacent byte pair  (37 80 → 80 37, 40 12 → 12 40)
+      for (let i = 0; i + 1 < out.length; i += 2) {
+        const t = out[i]; out[i] = out[i + 1]; out[i + 1] = t;
+      }
+      return out.buffer;
+    }
+
+    if (magic === 0x40123780) {
+      // .n64: reverse each 4-byte group  (40 12 37 80 → 80 37 12 40)
+      for (let i = 0; i + 3 < out.length; i += 4) {
+        let t;
+        t = out[i];     out[i]     = out[i + 3]; out[i + 3] = t;
+        t = out[i + 1]; out[i + 1] = out[i + 2]; out[i + 2] = t;
+      }
+      return out.buffer;
+    }
+
+    return buf; // unrecognised magic — pass through unchanged
   }
 }
