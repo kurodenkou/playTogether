@@ -256,7 +256,10 @@ class LibretroAdapter {
     this.canvas    = canvas;
     this.playerIds = playerIds;
     this.M         = coreModule;
-    this.ctx       = canvas.getContext('2d');
+    // 2D context obtained lazily in _resize() for software-rendered cores.
+    // Hardware-rendered (GL) cores use a WebGL2 context instead; the two are
+    // mutually exclusive on the same canvas element.
+    this.ctx       = null;
 
     this._imageData   = null;
     this._frameBuffer = null;   // Uint32Array view into _imageData.data
@@ -264,6 +267,10 @@ class LibretroAdapter {
     this._height      = 0;
     this._pixelFormat = LibretroAdapter.PIXEL_FORMAT.RGB1555;
     this._dirty       = false;
+
+    // Hardware (GL) rendering state — populated by the SET_HW_RENDER handler.
+    this._hwRender       = false;  // true when the core uses OpenGL rendering
+    this._hwContextReset = 0;      // WASM table index of retro_hw_context_reset_t
 
     this._romLoaded   = false;
     this._audioMuted  = false;
@@ -461,9 +468,58 @@ class LibretroAdapter {
       case ENV.SET_CORE_OPTIONS_V2_INTL:
         return true;
 
-      case ENV.SET_HW_RENDER:
-        // Hardware (OpenGL/Vulkan) rendering is not supported in this browser frontend.
-        return false;
+      case ENV.SET_HW_RENDER: {
+        // retro_hw_render_callback layout (32-bit WASM, natural alignment):
+        //   context_type            (enum/u32)  offset  0
+        //   context_reset           (fn ptr)    offset  4
+        //   get_current_framebuffer (fn ptr)    offset  8
+        //   get_proc_address        (fn ptr)    offset 12
+        //   depth / stencil / bottom_left_origin (3×bool) offset 16–18
+        //   version_major / version_minor       (2×u32)   offset 20–24
+        const ctxType  = M.HEAPU32[(data     ) >> 2];  // RETRO_HW_CONTEXT_* enum
+        const ctxReset = M.HEAPU32[(data +  4) >> 2];  // fn ptr: called when GL ready
+
+        // Vulkan (7) is not supported; everything else maps to WebGL2.
+        if (ctxType === 7 /* RETRO_HW_CONTEXT_VULKAN */) return false;
+
+        // Obtain a WebGL2 context on the game canvas.  This must happen before
+        // retro_init returns; deferring is not possible.
+        const gl = this.canvas.getContext('webgl2');
+        if (!gl) {
+          console.warn('[LibretroAdapter] WebGL2 unavailable; hardware-rendered core will not load.');
+          return false;
+        }
+
+        // Register the WebGL2 context with Emscripten's GL module so that the
+        // core's compiled-in glXxx() calls are routed to this canvas via the
+        // standard Emscripten WebGL→OpenGL translation layer.
+        if (typeof M.GL?.registerContext === 'function') {
+          const handle = M.GL.registerContext(gl, { majorVersion: 2, minorVersion: 0 });
+          M.GL.makeContextCurrent(handle);
+        }
+
+        // get_current_framebuffer: always return 0 (the default WebGL FBO).
+        const fboFn = this._addFn(() => 0, 'i');
+        M.HEAPU32[(data +  8) >> 2] = fboFn;
+
+        // get_proc_address: delegate to _emscripten_GetProcAddress when the
+        // symbol is exported (requires -lGL-getprocaddr + explicit export in the
+        // build).  GLideN64 calls rglgen_resolve_symbols() with this callback to
+        // obtain WASM table indices for every GL entry point it uses.
+        // If the symbol is absent we return 0; Emscripten's statically-linked
+        // GL stubs will still be called via direct WASM call instructions.
+        const procFn = this._addFn(
+          typeof M._emscripten_GetProcAddress === 'function'
+            ? (namePtr) => M._emscripten_GetProcAddress(namePtr) | 0
+            : (_namePtr) => 0,
+          'ii',
+        );
+        M.HEAPU32[(data + 12) >> 2] = procFn;
+
+        this._hwRender       = true;
+        this._hwContextReset = ctxReset;
+        return true;
+      }
 
       default:
         return false;
@@ -481,6 +537,14 @@ class LibretroAdapter {
    * below produce this value from each source format.
    */
   _onVideoRefresh(dataPtr, width, height, pitch) {
+    if (this._hwRender) {
+      // Core rendered directly to the WebGL framebuffer (RETRO_HW_FRAME_BUFFER_VALID).
+      // Emscripten's GL→WebGL layer has already updated the canvas; nothing to blit.
+      if (width !== this._width || height !== this._height) this._resize(width, height);
+      this._dirty = true;
+      return;
+    }
+
     if (!dataPtr) return;  // null = duplicate frame (CAN_DUPE); nothing to do
 
     if (width !== this._width || height !== this._height) this._resize(width, height);
@@ -547,15 +611,20 @@ class LibretroAdapter {
   /** Resize the canvas and reallocate the pixel buffers. */
   _resize(width, height) {
     if (width <= 0 || height <= 0) return;
-    // Create ImageData first; if it throws (invalid dimensions) leave existing
-    // state intact so subsequent calls with valid dimensions can still succeed.
+    this.canvas.width  = width;
+    this.canvas.height = height;
+    this._width  = width;
+    this._height = height;
+    // Hardware-rendered cores draw directly to the WebGL canvas; no ImageData needed.
+    if (this._hwRender) return;
+    // Lazily obtain the 2D context for software-rendered cores (canvas must not
+    // have a WebGL context already, which is guaranteed by the hwRender guard above).
+    if (!this.ctx) this.ctx = this.canvas.getContext('2d');
+    // Create ImageData; if it throws (invalid dimensions) leave existing state
+    // intact so subsequent calls with valid dimensions can still succeed.
     const imageData = this.ctx.createImageData(width, height);
     this._imageData   = imageData;
     this._frameBuffer = new Uint32Array(imageData.data.buffer);
-    this._width  = width;
-    this._height = height;
-    this.canvas.width  = width;
-    this.canvas.height = height;
   }
 
   // ── Audio callbacks ──────────────────────────────────────────────────────────
@@ -600,6 +669,12 @@ class LibretroAdapter {
    * Reuses snes-audio-worklet.js — the worklet is generic Float32 stereo.
    */
   async _initAudio() {
+    // AudioWorklet is only available in secure contexts (HTTPS / localhost).
+    // Detect this early so we don't create an AudioContext we immediately discard.
+    if (!window.isSecureContext) {
+      console.warn('[LibretroAdapter] AudioWorklet requires HTTPS; audio disabled.');
+      return;
+    }
     try {
       this._audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       await this._audioCtx.audioWorklet.addModule('/js/snes-audio-worklet.js');
@@ -619,7 +694,9 @@ class LibretroAdapter {
         await this._audioCtx.resume().catch(() => {});
       }
     } catch (err) {
-      console.error('[LibretroAdapter] AudioWorklet setup failed, audio disabled:', err);
+      // Close any partially-initialised AudioContext to avoid a resource leak.
+      if (this._audioCtx) { this._audioCtx.close().catch(() => {}); }
+      console.warn('[LibretroAdapter] AudioWorklet setup failed, audio disabled:', err);
       this._audioCtx    = null;
       this._workletNode = null;
     }
@@ -770,6 +847,19 @@ class LibretroAdapter {
     M._free(avPtr);
 
     this._resize(baseW || 320, baseH || 240);
+
+    // For hardware-rendered cores, call the context_reset hook now that the
+    // canvas has the correct dimensions and the GL context is active.
+    // The core uses this to compile shaders, upload geometry/textures, and
+    // bind the default framebuffer — the equivalent of "GL context is ready".
+    if (this._hwRender && this._hwContextReset) {
+      const table = M.wasmTable ?? M.__indirect_function_table;
+      if (table) {
+        try { table.get(this._hwContextReset)(); }
+        catch (e) { console.error('[LibretroAdapter] context_reset threw:', e); }
+      }
+    }
+
     this._romLoaded = true;
   }
 
@@ -844,9 +934,11 @@ class LibretroAdapter {
 
   /** Blit the latest framebuffer to the canvas (one putImageData call). */
   render() {
-    if (!this._dirty || !this._imageData) return;
-    this.ctx.putImageData(this._imageData, 0, 0);
+    if (!this._dirty) return;
     this._dirty = false;
+    if (this._hwRender) return;  // GL canvas already up to date; nothing to blit
+    if (!this._imageData) return;
+    this.ctx.putImageData(this._imageData, 0, 0);
   }
 
   /**

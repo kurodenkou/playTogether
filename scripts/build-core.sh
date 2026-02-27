@@ -135,6 +135,17 @@ CORE_MAKEFILE[fbalpha2012_cps1]="makefile.libretro"  # note lowercase 'm'
 declare -A CORE_MEMORY
 CORE_MEMORY[n64wasm]="268435456"   # 256 MB
 
+# CORE_LINK_EXTRA: additional emcc/wasm-ld flags appended verbatim to the
+# link_core emcc command for specific cores (space-separated).
+# n64wasm: export emscripten_GetProcAddress so the JS frontend can delegate
+# retro_hw_render_callback.get_proc_address to it.  GLideN64 calls
+# rglgen_resolve_symbols() with this callback to obtain WASM table indices for
+# every GL entry point it uses; without it all function pointers are null and
+# the core traps on the first GL call.
+# --export-if-defined is safe: silently skipped if the symbol is absent.
+declare -A CORE_LINK_EXTRA
+CORE_LINK_EXTRA[n64wasm]='-Wl,--export-if-defined=emscripten_GetProcAddress'
+
 # ── emcc exported functions (standard libretro C API + allocator) ──────────────
 EXPORTED_FN='["_retro_init","_retro_deinit","_retro_get_system_info","_retro_get_system_av_info","_retro_set_environment","_retro_set_video_refresh","_retro_set_input_poll","_retro_set_input_state","_retro_set_audio_sample","_retro_set_audio_sample_batch","_retro_reset","_retro_run","_retro_serialize_size","_retro_serialize","_retro_unserialize","_retro_load_game","_retro_unload_game","_malloc","_free"]'
 
@@ -340,6 +351,7 @@ link_core() {
     em_libz="$(em-config CACHE)/sysroot/lib/wasm32-emscripten/libz.a"
 
     local initial_mem="${CORE_MEMORY[$id]:-67108864}"
+    local extra_link="${CORE_LINK_EXTRA[$id]:-}"
 
     emcc "$bc" -o "$out/core.js" \
         -O2 \
@@ -353,6 +365,7 @@ link_core() {
         -s DISABLE_EXCEPTION_CATCHING=1 \
         -s EXPORTED_RUNTIME_METHODS='["addFunction","UTF8ToString","HEAP8","HEAP16","HEAP32","HEAPU8","HEAPU16","HEAPU32","HEAPF32","HEAPF64"]' \
         -s "EXPORTED_FUNCTIONS=$EXPORTED_FN" \
+        ${extra_link:+$extra_link} \
         "$em_libz"
 
     # Write metadata consumed by GET /api/cores and the UI dropdown.
