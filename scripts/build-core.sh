@@ -463,10 +463,17 @@ build_n64wasm() {
     info "Building n64wasm: emmake HAVE_DYNAREC=0 STATIC_LINKING=1 + emar archive…"
     emmake make -C "$src" clean 2>/dev/null || true
 
-    # Compile all sources.  The final link step may fail (wasm-ld cannot
-    # produce a native .so); that is expected — the per-file .o outputs are
-    # what we need.
-    emmake make -C "$src" \
+    # mupen64plus-core/src/api/debugger.c uses tentative (common) symbol
+    # declarations (e.g. bare `int op;`) which WebAssembly does not support.
+    # Emscripten rejects them with "common symbols are not yet implemented for
+    # Wasm", causing make to abort before libretro.cpp is compiled — which is
+    # why retro_init etc. end up missing from the archive.
+    #
+    # EMCC_CFLAGS is appended by emcc to every compilation regardless of what
+    # the Makefile sets for CFLAGS, making it the safest injection point.
+    # -fno-common turns tentative definitions into explicit BSS allocations,
+    # which are fully supported by wasm-ld.
+    EMCC_CFLAGS="-fno-common" emmake make -C "$src" \
         HAVE_DYNAREC=0 \
         WITH_DYNAREC= \
         STATIC_LINKING=1 \
