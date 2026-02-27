@@ -125,6 +125,7 @@ class LibretroAdapter {
       // JS callbacks registered via the direct table-manipulation path in _addFn.
       let _capturedMem       = null;
       let _capturedTable     = null;
+      let _capturedExports   = null;   // raw WASM instance exports (superset of Module._xxx)
       const _origInst        = WebAssembly.instantiate;
       const _origInstS       = WebAssembly.instantiateStreaming;
       const _restoreWA       = () => {
@@ -143,6 +144,10 @@ class LibretroAdapter {
                         ?? exports.table
                         ?? null;
         }
+        // Keep the full exports object so JS code can call WASM symbols that
+        // were exported via wasm-ld --export-if-defined but that Emscripten's
+        // JS glue did NOT wrap (i.e. absent from EXPORTED_FUNCTIONS).
+        if (!_capturedExports && exports) _capturedExports = exports;
       };
       WebAssembly.instantiate = (source, imports) => {
         _captureMem(imports);
@@ -198,6 +203,14 @@ class LibretroAdapter {
           // the table is always present as a wasm export and we captured it above.
           if (_capturedTable && !live.wasmTable && !live.__indirect_function_table) {
             live.__indirect_function_table = _capturedTable;
+          }
+
+          // Expose the raw WASM module exports.  Symbols exported via wasm-ld
+          // --export-if-defined (e.g. emscripten_GetProcAddress for n64wasm) are
+          // available here even when Emscripten's JS glue didn't create Module._xxx
+          // wrappers for them (that only happens for EXPORTED_FUNCTIONS entries).
+          if (_capturedExports && !live._wasmExports) {
+            live._wasmExports = _capturedExports;
           }
 
           resolve(live);
@@ -516,12 +529,29 @@ class LibretroAdapter {
         const glProcCache = Object.create(null);
         const GL = M.GL;
         // Build a resolver function once, checking capabilities eagerly.
+        // Resolution priority:
+        //  1. Module._emscripten_GetProcAddress  — created by Emscripten's JS glue
+        //     when the symbol is in EXPORTED_FUNCTIONS (fully correct path).
+        //  2. M._wasmExports.emscripten_GetProcAddress  — the raw WebAssembly
+        //     ExportedFunction; present when the symbol was exported via wasm-ld
+        //     --export-if-defined but not listed in EXPORTED_FUNCTIONS.  Directly
+        //     callable from JS with integer arguments; works after the n64wasm rebuild.
+        //  3. Module.GL internal proc-address API (varies by Emscripten version).
+        //  4. Return 0 with a clear rebuild hint.
+        const _rawGetProcAddr =
+          (typeof M._emscripten_GetProcAddress === 'function'
+            ? M._emscripten_GetProcAddress
+            : null)
+          ?? (typeof M._wasmExports?.emscripten_GetProcAddress === 'function'
+            ? M._wasmExports.emscripten_GetProcAddress
+            : null);
+
         const _glProcResolve = (() => {
-          if (typeof M._emscripten_GetProcAddress === 'function') {
-            // Post-rebuild fast path: pass the C string pointer directly.
-            return (namePtr) => M._emscripten_GetProcAddress(namePtr) | 0;
+          if (_rawGetProcAddr) {
+            // Paths 1 & 2: pass the C string pointer directly to the WASM function.
+            return (namePtr) => _rawGetProcAddr(namePtr) | 0;
           }
-          // Try Emscripten GL module internals (JS-string API, varies by version).
+          // Path 3: Emscripten GL module internals (JS-string API, varies by version).
           const glLookup = GL?.getProcAddress?.bind(GL)
                         ?? GL?.getWebGLProcAddress?.bind(GL)
                         ?? GL?.procAddressLookup?.bind(GL);
@@ -532,9 +562,7 @@ class LibretroAdapter {
               return (glProcCache[name] = glLookup(name) | 0);
             };
           }
-          // No resolver available: log once and return 0.
-          // retro_load_game will trap on the first null call_indirect.
-          // Fix: rebuild n64wasm — build-core.sh now exports the symbol.
+          // Path 4: no resolver — warn once, return 0, retro_load_game will trap.
           let warned = false;
           return (namePtr) => {
             if (!warned) {
