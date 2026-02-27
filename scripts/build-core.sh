@@ -110,7 +110,7 @@ CORE_BUILD[fbalpha2012_cps1]="make"
 CORE_REPO[n64wasm]="https://github.com/libretro/mupen64plus-libretro-nx.git"
 CORE_NAME[n64wasm]="n64wasm (Nintendo 64)"
 CORE_SYSTEM[n64wasm]="n64"
-CORE_BUILD[n64wasm]="make_static_override"
+CORE_BUILD[n64wasm]="n64wasm"
 
 # ── Per-core Makefile overrides ────────────────────────────────────────────────
 # CORE_MAKEDIR: subdirectory within the cloned repo that contains the Makefile.
@@ -439,6 +439,51 @@ build_gearboy() {
     [[ -f "$archive" ]] || die "gearboy: emar archive step failed"
 }
 
+# ── Build mupen64plus-next (n64wasm) ─────────────────────────────────────────
+# mupen64plus-libretro-nx requires special handling for three reasons:
+#
+#   1. The Makefile has no 'platform=emscripten' case; passing it causes the
+#      libretro interface translation unit (retro_init, retro_run, …) to be
+#      compiled under a code-path that omits those symbols.  Omitting the flag
+#      lets emmake's CC=emcc / CXX=em++ override take effect directly.
+#
+#   2. The x86/x86-64 JIT dynarec is incompatible with WebAssembly.
+#      HAVE_DYNAREC=0 and WITH_DYNAREC= disable both the compile-time enable
+#      flag and the architecture-selection variable used by the Makefile.
+#
+#   3. STATIC_LINKING=1 tells the Makefile to target a .a static archive and
+#      skip the shared-lib (.so) link step that wasm-ld cannot satisfy.
+#      For this core the libretro symbols are NOT gated behind STATIC_LINKING,
+#      so there is no missing-symbol risk from using it (unlike gambatte etc.).
+
+build_n64wasm() {
+    local src="$SRC_DIR/n64wasm"
+    local archive="$src/n64wasm_libretro_emscripten.a"
+
+    info "Building n64wasm: emmake HAVE_DYNAREC=0 STATIC_LINKING=1 + emar archive…"
+    emmake make -C "$src" clean 2>/dev/null || true
+
+    # Compile all sources.  The final link step may fail (wasm-ld cannot
+    # produce a native .so); that is expected — the per-file .o outputs are
+    # what we need.
+    emmake make -C "$src" \
+        HAVE_DYNAREC=0 \
+        WITH_DYNAREC= \
+        STATIC_LINKING=1 \
+        -j"$(nproc 2>/dev/null || echo 4)" 2>&1 || true
+
+    local objects
+    mapfile -t objects < <(find "$src" -name "*.o" \
+        -not -path "*/node_modules/*" | sort)
+    [[ ${#objects[@]} -gt 0 ]] || \
+        die "n64wasm: no .o files found — did the compilation step fail?"
+
+    info "Archiving ${#objects[@]} n64wasm object(s) with emar…"
+    rm -f "$archive"
+    emar rcs "$archive" "${objects[@]}"
+    [[ -f "$archive" ]] || die "n64wasm: emar archive step failed"
+}
+
 # ── Compile one core end-to-end ────────────────────────────────────────────────
 
 build_core() {
@@ -459,6 +504,9 @@ build_core() {
             ;;
         gearboy)
             build_gearboy
+            ;;
+        n64wasm)
+            build_n64wasm
             ;;
         *)
             build_make "$id"
