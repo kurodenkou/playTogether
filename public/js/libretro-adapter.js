@@ -635,6 +635,36 @@ class LibretroAdapter {
         return true;
       }
 
+      case ENV.GET_LOG_INTERFACE: {
+        // Core wants a logging callback.
+        //
+        // struct retro_log_callback { retro_log_printf_t log; }
+        // retro_log_printf_t = void (*)(enum retro_log_level, const char *fmt, ...)
+        //
+        // Emscripten compiles C '...' varargs by passing an extra i32 pointer to
+        // a stack-allocated va_list, making the WASM type:
+        //   (i32 level, i32 fmt_ptr, i32 va_ptr) → void  →  addFunction sig 'viii'
+        //
+        // If we return false here the core leaves its log_printf pointer at NULL
+        // (table index 0).  The first call_indirect[viii](0, …) then traps with
+        // "function signature mismatch" because function 0 has type () → void.
+        if (!this._logCallbackFn) {
+          this._logCallbackFn = this._addFn((level, fmtPtr, _va) => {
+            try {
+              const msg = M.UTF8ToString(fmtPtr).trimEnd();
+              if (!msg) return;
+              // level: 0=DEBUG 1=INFO 2=WARN 3=ERROR
+              const con = level >= 3 ? console.error
+                        : level === 2 ? console.warn
+                        : console.log;
+              con('[core]', msg);
+            } catch (_) {}
+          }, 'viii');
+        }
+        M.HEAPU32[data >> 2] = this._logCallbackFn;
+        return true;
+      }
+
       // Silently acknowledge commands that need no action from our frontend.
       case ENV.SET_PERFORMANCE_LEVEL:
       case ENV.SET_VARIABLES:
