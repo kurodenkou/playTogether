@@ -325,6 +325,8 @@ class LibretroAdapter {
     // Hardware (GL) rendering state — populated by the SET_HW_RENDER handler.
     this._hwRender       = false;  // true when the core uses OpenGL rendering
     this._hwContextReset = 0;      // WASM table index of retro_hw_context_reset_t
+    this._glContext      = null;   // WebGL2 RenderingContext for GL cores
+    this._glHandle       = 0;      // Emscripten GL.contexts handle (for makeContextCurrent)
 
     this._romLoaded   = false;
     this._audioMuted  = false;
@@ -702,9 +704,37 @@ class LibretroAdapter {
         // Register the WebGL2 context with Emscripten's GL module so that the
         // core's compiled-in glXxx() calls are routed to this canvas via the
         // standard Emscripten WebGL→OpenGL translation layer.
-        if (typeof M.GL?.registerContext === 'function') {
-          const handle = M.GL.registerContext(gl, { majorVersion: 2, minorVersion: 0 });
-          M.GL.makeContextCurrent(handle);
+        //
+        // Emscripten's registerContext() may use Module.canvas to identify the
+        // canvas — set it before calling so it doesn't look up a stale reference.
+        this._glContext = gl;
+        this._glHandle  = 0;
+        if (M.GL) {
+          if (!M.canvas) M.canvas = this.canvas;
+          if (typeof M.GL.registerContext === 'function') {
+            const h = M.GL.registerContext(gl, { majorVersion: 2, minorVersion: 0 });
+            if (h) {
+              M.GL.makeContextCurrent(h);
+              this._glHandle = h;
+            }
+          }
+          // Fallback: registerContext may be absent (newer Emscripten) or may have
+          // returned handle 0 (failure).  Manually insert the context entry so that
+          // makeContextCurrent(1) can set GL.currentContext and the module-scoped
+          // GLctx variable that every _emscripten_glXxx stub reads.
+          if (!this._glHandle) {
+            const h = 1;
+            M.GL.contexts = M.GL.contexts ?? {};
+            M.GL.contexts[h] = { handle: h, attributes: {}, version: 2, GLctx: gl };
+            if (typeof M.GL.makeContextCurrent === 'function') {
+              M.GL.makeContextCurrent(h);
+            } else {
+              // Very old / non-standard Emscripten: assign directly.
+              M.GL.currentContext = M.GL.contexts[h];
+              M['ctx'] = gl;
+            }
+            this._glHandle = h;
+          }
         }
 
         // get_current_framebuffer: always return 0 (the default WebGL FBO).
@@ -1230,6 +1260,19 @@ class LibretroAdapter {
     // The core uses this to compile shaders, upload geometry/textures, and
     // bind the default framebuffer — the equivalent of "GL context is ready".
     if (this._hwRender && this._hwContextReset) {
+      // Re-activate the GL context.  GL.currentContext (and the module-scoped
+      // GLctx) may have been cleared between the SET_HW_RENDER callback and now
+      // (e.g. by retro_load_game internals or Emscripten lazy-init).  Calling
+      // makeContextCurrent again is idempotent and ensures every _emscripten_glXxx
+      // stub sees a valid context before the core's context_reset fires.
+      if (M.GL && this._glHandle) {
+        if (typeof M.GL.makeContextCurrent === 'function') {
+          M.GL.makeContextCurrent(this._glHandle);
+        } else {
+          M.GL.currentContext = M.GL.contexts?.[this._glHandle] ?? null;
+          if (this._glContext) M['ctx'] = this._glContext;
+        }
+      }
       const table = M.wasmTable ?? M.__indirect_function_table;
       if (table) {
         try { table.get(this._hwContextReset)(); }
