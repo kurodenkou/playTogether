@@ -18,7 +18,13 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, 'public'), {
+  setHeaders(res, filePath) {
+    if (filePath.endsWith('.wasm')) {
+      res.setHeader('Content-Type', 'application/wasm');
+    }
+  },
+}));
 
 // ── Serve the jsnes browser bundle ────────────────────────────────────────────
 app.get('/js/jsnes.js', (_req, res) =>
