@@ -805,8 +805,21 @@ class LibretroAdapter {
         // Signature format: Emscripten type string (first char = return, rest = params).
         const _WEBGL_UNSUPPORTED_STUBS = {
           // EGL image extension — EGL concepts don't exist in WebGL.
-          glEGLImageTargetRenderbufferStorageOES: 'vii',  // void(GLenum, GLeglImageOES)
-          glEGLImageTargetTexture2DOES:           'vii',  // void(GLenum, GLeglImageOES)
+          glEGLImageTargetRenderbufferStorageOES: 'vii',   // void(GLenum, GLeglImageOES)
+          glEGLImageTargetTexture2DOES:           'vii',   // void(GLenum, GLeglImageOES)
+          // GL_KHR_debug / GL_ARB_debug_output — not available in WebGL2.
+          // Cores (e.g. GLideN64) probe/call these via get_proc_address; a ZERO
+          // table index causes a call_indirect trap.  Register harmless no-ops.
+          glDebugMessageControl:   'viiiiii', // void(GLenum src, GLenum type, GLenum sev, GLsizei n, const GLuint* ids, GLboolean en)
+          glDebugMessageCallback:  'vii',     // void(GLDEBUGPROC cb, const void* userParam)
+          glDebugMessageInsert:    'viiiiii', // void(GLenum src, GLenum type, GLuint id, GLenum sev, GLsizei len, const GLchar* buf)
+          glGetDebugMessageLog:    'iiiiiiiii', // GLuint(GLuint n, GLsizei bufSz, GLenum* srcs, GLenum* types, GLuint* ids, GLenum* sevs, GLsizei* lens, GLchar* log)
+          glPushDebugGroup:        'viiii',   // void(GLenum src, GLuint id, GLsizei len, const GLchar* msg)
+          glPopDebugGroup:         'v',       // void()
+          glObjectLabel:           'viiii',   // void(GLenum id, GLuint name, GLsizei len, const GLchar* label)
+          glObjectPtrLabel:        'viii',    // void(const void* ptr, GLsizei len, const GLchar* label)
+          glGetObjectLabel:        'viiiii',  // void(GLenum id, GLuint name, GLsizei bufSz, GLsizei* len, GLchar* label)
+          glGetObjectPtrLabel:     'viiii',   // void(const void* ptr, GLsizei bufSz, GLsizei* len, GLchar* label)
         };
         // Cache: function name → registered table index (created on first zero hit).
         const _noopStubCache = Object.create(null);
@@ -1316,40 +1329,54 @@ class LibretroAdapter {
     // The core uses this to compile shaders, upload geometry/textures, and
     // bind the default framebuffer — the equivalent of "GL context is ready".
     if (this._hwRender && this._hwContextReset) {
-      // Late-register the GL context if M.GL was absent at SET_HW_RENDER time
-      // (Emscripten may lazy-initialise GL only after the first retro_init call).
-      if (M.GL && !this._glHandle && this._glContext) {
-        if (typeof M.GL.registerContext === 'function') {
-          const h = M.GL.registerContext(this._glContext, { majorVersion: 2, minorVersion: 0 });
-          if (h) this._glHandle = h;
-        }
-        if (!this._glHandle) {
-          const h = typeof M.GL.getNewId === 'function'
-            ? M.GL.getNewId(M.GL.contexts)
-            : 1;
-          M.GL.contexts = M.GL.contexts ?? {};
-          M.GL.contexts[h] = {
-            handle: h,
-            attributes: { majorVersion: 2, minorVersion: 0 },
-            version: 2,
-            GLctx: this._glContext,
-          };
-          this._glHandle = h;
+      // Ensure the GL context is registered with M.GL and is the active context
+      // before firing context_reset.  There are two scenarios where the handle
+      // stored during SET_HW_RENDER can be stale by the time we get here:
+      //
+      //  a) M.GL was absent at SET_HW_RENDER time (lazy Emscripten init) —
+      //     this._glHandle is still 0.
+      //  b) M.GL was fully re-initialised by retro_init (some cores trigger GL
+      //     lazy-init inside retro_init) — this._glHandle is non-zero but the
+      //     entry has been wiped from the fresh M.GL.contexts map.
+      //
+      // In both cases we need to (re-)register before calling makeContextCurrent,
+      // because makeContextCurrent(staleHandle) silently sets GL.currentContext =
+      // undefined (lookup miss), which then causes emscriptenWebGLGet to throw
+      // "Cannot read properties of undefined (reading 'version')".
+      if (M.GL && this._glContext) {
+        const handleValid = this._glHandle && !!M.GL.contexts?.[this._glHandle];
+        if (!handleValid) {
+          // (Re-)register the WebGL2 context.
+          let newHandle = 0;
+          if (typeof M.GL.registerContext === 'function') {
+            newHandle = M.GL.registerContext(this._glContext, { majorVersion: 2, minorVersion: 0 });
+          }
+          if (!newHandle) {
+            newHandle = typeof M.GL.getNewId === 'function'
+              ? M.GL.getNewId(M.GL.contexts)
+              : (this._glHandle || 1);
+            M.GL.contexts = M.GL.contexts ?? {};
+            M.GL.contexts[newHandle] = {
+              handle: newHandle,
+              attributes: { majorVersion: 2, minorVersion: 0 },
+              version: 2,
+              GLctx: this._glContext,
+            };
+          }
+          this._glHandle = newHandle;
         }
       }
 
       // Re-activate the GL context.  GL.currentContext (and the module-scoped
-      // GLctx) may have been cleared between the SET_HW_RENDER callback and now
-      // (e.g. by retro_load_game internals or Emscripten lazy-init).  Calling
-      // makeContextCurrent again is idempotent and ensures every _emscripten_glXxx
-      // stub sees a valid context before the core's context_reset fires.
+      // GLctx) may have been cleared between the SET_HW_RENDER callback and now.
       if (M.GL && this._glHandle) {
         if (typeof M.GL.makeContextCurrent === 'function') {
           M.GL.makeContextCurrent(this._glHandle);
         }
-        // Belt-and-suspenders: if makeContextCurrent was a no-op or absent,
-        // write GL.currentContext directly so emscriptenWebGLGet can read .version.
-        if (!M.GL.currentContext) {
+        // Belt-and-suspenders: makeContextCurrent may be a no-op in some builds,
+        // or may leave currentContext without a .version field.  Write the context
+        // directly so emscriptenWebGLGet can always read .version and GLctx.
+        if (!M.GL.currentContext?.version) {
           M.GL.currentContext = M.GL.contexts?.[this._glHandle] ?? null;
           if (this._glContext) M['ctx'] = this._glContext;
         }
