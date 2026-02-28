@@ -720,14 +720,29 @@ class LibretroAdapter {
           }
           // Fallback: registerContext may be absent (newer Emscripten) or may have
           // returned handle 0 (failure).  Manually insert the context entry so that
-          // makeContextCurrent(1) can set GL.currentContext and the module-scoped
+          // makeContextCurrent(h) can set GL.currentContext and the module-scoped
           // GLctx variable that every _emscripten_glXxx stub reads.
           if (!this._glHandle) {
-            const h = 1;
+            // Use getNewId if available so we don't collide with a handle the
+            // core already registered internally.
+            const h = typeof M.GL.getNewId === 'function'
+              ? M.GL.getNewId(M.GL.contexts)
+              : 1;
             M.GL.contexts = M.GL.contexts ?? {};
-            M.GL.contexts[h] = { handle: h, attributes: {}, version: 2, GLctx: gl };
+            M.GL.contexts[h] = {
+              handle: h,
+              attributes: { majorVersion: 2, minorVersion: 0 },
+              version: 2,
+              GLctx: gl,
+            };
             if (typeof M.GL.makeContextCurrent === 'function') {
               M.GL.makeContextCurrent(h);
+              // makeContextCurrent may be a no-op in some Emscripten builds —
+              // verify it actually set GL.currentContext and fall back if not.
+              if (!M.GL.currentContext) {
+                M.GL.currentContext = M.GL.contexts[h];
+                M['ctx'] = gl;
+              }
             } else {
               // Very old / non-standard Emscripten: assign directly.
               M.GL.currentContext = M.GL.contexts[h];
@@ -783,6 +798,35 @@ class LibretroAdapter {
             ? M._wasmExports.emscripten_GetProcAddress
             : null);
 
+        // GL extension functions that don't exist in WebGL2/Emscripten.
+        // When get_proc_address returns 0 for these, a call_indirect through the
+        // null slot traps immediately.  Provide no-op stubs so the core can test
+        // the pointer for null (or call it harmlessly) without crashing.
+        // Signature format: Emscripten type string (first char = return, rest = params).
+        const _WEBGL_UNSUPPORTED_STUBS = {
+          // EGL image extension — EGL concepts don't exist in WebGL.
+          glEGLImageTargetRenderbufferStorageOES: 'vii',  // void(GLenum, GLeglImageOES)
+          glEGLImageTargetTexture2DOES:           'vii',  // void(GLenum, GLeglImageOES)
+        };
+        // Cache: function name → registered table index (created on first zero hit).
+        const _noopStubCache = Object.create(null);
+
+        // Helper: resolve a name (JS string) to a no-op stub index, or 0 on failure.
+        const _noopStubFor = (name) => {
+          if (name in _noopStubCache) return _noopStubCache[name];
+          const sig = _WEBGL_UNSUPPORTED_STUBS[name];
+          if (!sig) return (_noopStubCache[name] = 0);
+          try {
+            const idx = this._addFn(() => {}, sig);
+            console.log('[LibretroAdapter] get_proc_address: registered no-op stub for',
+              name, '→ table index', idx);
+            return (_noopStubCache[name] = idx);
+          } catch (e) {
+            console.warn('[LibretroAdapter] get_proc_address: could not register stub for', name, e);
+            return (_noopStubCache[name] = 0);
+          }
+        };
+
         const _glProcResolve = (() => {
           if (_rawGetProcAddr) {
             const _path = typeof M._emscripten_GetProcAddress === 'function' ? 1 : 2;
@@ -792,7 +836,7 @@ class LibretroAdapter {
             let _zeroCount = 0;
             // Paths 1 & 2: pass the C string pointer directly to the WASM function.
             return (namePtr) => {
-              const result = _rawGetProcAddr(namePtr) | 0;
+              let result = _rawGetProcAddr(namePtr) | 0;
               if (_callCount < 20) {
                 try {
                   console.log('[LibretroAdapter] get_proc_address[' + _callCount + ']',
@@ -802,11 +846,18 @@ class LibretroAdapter {
                 console.log('[LibretroAdapter] get_proc_address: (further calls suppressed)');
               }
               if (result === 0) {
-                _zeroCount++;
-                try {
+                // Attempt to substitute a safe no-op stub so the core can call the
+                // function pointer without triggering a call_indirect trap.
+                let name = '';
+                try { name = M.UTF8ToString(namePtr); } catch (_) {}
+                const stub = _noopStubFor(name);
+                if (stub) {
+                  result = stub;
+                } else {
+                  _zeroCount++;
                   console.warn('[LibretroAdapter] get_proc_address: ZERO index for',
-                    M.UTF8ToString(namePtr), '— this GL fn is unresolved and will trap on call_indirect');
-                } catch (_) {}
+                    name || namePtr, '— this GL fn is unresolved and will trap on call_indirect');
+                }
               }
               _callCount++;
               return result;
@@ -821,7 +872,12 @@ class LibretroAdapter {
             return (namePtr) => {
               const name = M.UTF8ToString(namePtr);
               if (name in glProcCache) return glProcCache[name];
-              return (glProcCache[name] = glLookup(name) | 0);
+              const result = glLookup(name) | 0;
+              if (result === 0) {
+                const stub = _noopStubFor(name);
+                return (glProcCache[name] = stub || 0);
+              }
+              return (glProcCache[name] = result);
             };
           }
           // Path 4: no resolver — warn once, return 0, retro_load_game will trap.
@@ -1260,6 +1316,28 @@ class LibretroAdapter {
     // The core uses this to compile shaders, upload geometry/textures, and
     // bind the default framebuffer — the equivalent of "GL context is ready".
     if (this._hwRender && this._hwContextReset) {
+      // Late-register the GL context if M.GL was absent at SET_HW_RENDER time
+      // (Emscripten may lazy-initialise GL only after the first retro_init call).
+      if (M.GL && !this._glHandle && this._glContext) {
+        if (typeof M.GL.registerContext === 'function') {
+          const h = M.GL.registerContext(this._glContext, { majorVersion: 2, minorVersion: 0 });
+          if (h) this._glHandle = h;
+        }
+        if (!this._glHandle) {
+          const h = typeof M.GL.getNewId === 'function'
+            ? M.GL.getNewId(M.GL.contexts)
+            : 1;
+          M.GL.contexts = M.GL.contexts ?? {};
+          M.GL.contexts[h] = {
+            handle: h,
+            attributes: { majorVersion: 2, minorVersion: 0 },
+            version: 2,
+            GLctx: this._glContext,
+          };
+          this._glHandle = h;
+        }
+      }
+
       // Re-activate the GL context.  GL.currentContext (and the module-scoped
       // GLctx) may have been cleared between the SET_HW_RENDER callback and now
       // (e.g. by retro_load_game internals or Emscripten lazy-init).  Calling
@@ -1268,7 +1346,10 @@ class LibretroAdapter {
       if (M.GL && this._glHandle) {
         if (typeof M.GL.makeContextCurrent === 'function') {
           M.GL.makeContextCurrent(this._glHandle);
-        } else {
+        }
+        // Belt-and-suspenders: if makeContextCurrent was a no-op or absent,
+        // write GL.currentContext directly so emscriptenWebGLGet can read .version.
+        if (!M.GL.currentContext) {
           M.GL.currentContext = M.GL.contexts?.[this._glHandle] ?? null;
           if (this._glContext) M['ctx'] = this._glContext;
         }
@@ -1315,6 +1396,21 @@ class LibretroAdapter {
     }
 
     if (this._audioCtx?.state === 'suspended') this._audioCtx.resume();
+
+    // For hardware-rendered cores, ensure Emscripten's GL module sees the right
+    // context before retro_run() issues any _emscripten_glXxx calls.
+    // GL.currentContext / GLctx can be cleared by browser task-scheduler boundaries
+    // or by the core calling emscripten_webgl_make_context_current(0) internally.
+    if (this._hwRender && this._glHandle) {
+      const gl = this.M.GL;
+      if (gl && typeof gl.makeContextCurrent === 'function') {
+        gl.makeContextCurrent(this._glHandle);
+      } else if (gl && !gl.currentContext) {
+        gl.currentContext = gl.contexts?.[this._glHandle] ?? null;
+        if (this._glContext) this.M['ctx'] = this._glContext;
+      }
+    }
+
     this.M._retro_run();
   }
 
