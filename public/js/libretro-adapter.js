@@ -213,6 +213,24 @@ class LibretroAdapter {
             live._wasmExports = _capturedExports;
           }
 
+          // ── Debug: surface export availability for GL proc-address diagnosis ─
+          {
+            const _hasGlue   = typeof live._emscripten_GetProcAddress === 'function';
+            const _hasRaw    = typeof _capturedExports?.emscripten_GetProcAddress === 'function';
+            const _glKeys    = live.GL ? Object.keys(live.GL).filter(k => /proc|address/i.test(k)) : [];
+            const _tableSlot = live.wasmTable ? 'wasmTable'
+                             : live.__indirect_function_table ? '__indirect_function_table'
+                             : 'NONE';
+            console.debug(
+              '[LibretroAdapter] Core ready.' ,
+              '| _emscripten_GetProcAddress (JS glue):', _hasGlue,
+              '| (raw WASM export):', _hasRaw,
+              '| GL proc methods:', _glKeys.join(', ') || '(none)',
+              '| addFunction:', typeof live.addFunction === 'function',
+              '| table:', _tableSlot,
+            );
+          }
+
           resolve(live);
         },
         print:    (msg) => console.log('[libretro]', msg),
@@ -528,6 +546,17 @@ class LibretroAdapter {
         //  3. Warn and return 0; retro_load_game will trap → rebuild is required.
         const glProcCache = Object.create(null);
         const GL = M.GL;
+
+        // Debug: log what's available before choosing a resolution strategy.
+        console.debug(
+          '[LibretroAdapter] SET_HW_RENDER ctxType=' + ctxType + ' ctxReset=' + ctxReset,
+          '| _emscripten_GetProcAddress (glue):', typeof M._emscripten_GetProcAddress,
+          '| _wasmExports.emscripten_GetProcAddress (raw):', typeof M._wasmExports?.emscripten_GetProcAddress,
+          '| GL.getProcAddress:', typeof M.GL?.getProcAddress,
+          '| GL.getWebGLProcAddress:', typeof M.GL?.getWebGLProcAddress,
+          '| GL.procAddressLookup:', typeof M.GL?.procAddressLookup,
+        );
+
         // Build a resolver function once, checking capabilities eagerly.
         // Resolution priority:
         //  1. Module._emscripten_GetProcAddress  — created by Emscripten's JS glue
@@ -548,14 +577,31 @@ class LibretroAdapter {
 
         const _glProcResolve = (() => {
           if (_rawGetProcAddr) {
+            const _path = typeof M._emscripten_GetProcAddress === 'function' ? 1 : 2;
+            console.debug('[LibretroAdapter] get_proc_address: using Path ' + _path +
+              ' (' + (_path === 1 ? 'Module._emscripten_GetProcAddress' : '_wasmExports direct') + ')');
+            let _callCount = 0;
             // Paths 1 & 2: pass the C string pointer directly to the WASM function.
-            return (namePtr) => _rawGetProcAddr(namePtr) | 0;
+            return (namePtr) => {
+              const result = _rawGetProcAddr(namePtr) | 0;
+              if (_callCount < 20) {
+                try {
+                  console.debug('[LibretroAdapter] get_proc_address[' + _callCount + ']',
+                    M.UTF8ToString(namePtr), '→', result);
+                } catch (_) {}
+              } else if (_callCount === 20) {
+                console.debug('[LibretroAdapter] get_proc_address: (further calls suppressed)');
+              }
+              _callCount++;
+              return result;
+            };
           }
           // Path 3: Emscripten GL module internals (JS-string API, varies by version).
           const glLookup = GL?.getProcAddress?.bind(GL)
                         ?? GL?.getWebGLProcAddress?.bind(GL)
                         ?? GL?.procAddressLookup?.bind(GL);
           if (typeof glLookup === 'function') {
+            console.debug('[LibretroAdapter] get_proc_address: using Path 3 (GL internal API)');
             return (namePtr) => {
               const name = M.UTF8ToString(namePtr);
               if (name in glProcCache) return glProcCache[name];
@@ -563,18 +609,13 @@ class LibretroAdapter {
             };
           }
           // Path 4: no resolver — warn once, return 0, retro_load_game will trap.
-          let warned = false;
-          return (namePtr) => {
-            if (!warned) {
-              warned = true;
-              console.error(
-                '[LibretroAdapter] get_proc_address: _emscripten_GetProcAddress is not ' +
-                'exported — GL function pointers will be null and retro_load_game will ' +
-                'crash.  Rebuild the n64wasm core:  scripts/build-core.sh n64wasm'
-              );
-            }
-            return 0;
-          };
+          console.error(
+            '[LibretroAdapter] get_proc_address: Path 4 — no resolver found.',
+            '_emscripten_GetProcAddress is missing from WASM exports.',
+            'Every GL function pointer will be 0; retro_load_game WILL trap.',
+            'Fix: rebuild the n64wasm core:  scripts/build-core.sh n64wasm',
+          );
+          return (namePtr) => 0;
         })();
         const procFn = this._addFn(_glProcResolve, 'ii');
         M.HEAPU32[(data + 12) >> 2] = procFn;
@@ -853,7 +894,25 @@ class LibretroAdapter {
       M.HEAPU32[(infoPtr +  8) >> 2] = 0;              // size = 0
       M.HEAPU32[(infoPtr + 12) >> 2] = 0;              // meta = NULL
 
-      ok = M._retro_load_game(infoPtr);
+      try {
+        ok = M._retro_load_game(infoPtr);
+      } catch (wasmErr) {
+        console.error('[LibretroAdapter] retro_load_game() trapped in WASM (FS path).');
+        console.error('  error message :', wasmErr.message);
+        console.error('  stack         :', wasmErr.stack ?? '(no stack)');
+        console.error('  hwRender      :', this._hwRender);
+        console.error('  hwContextReset:', this._hwContextReset);
+        console.error('  _emscripten_GetProcAddress (glue)  :', typeof M._emscripten_GetProcAddress);
+        console.error('  _wasmExports.emscripten_GetProcAddress (raw):', typeof M._wasmExports?.emscripten_GetProcAddress);
+        M._free(infoPtr);
+        if (pathPtr) M._free(pathPtr);
+        try { FS.unlink(virtPath); } catch (_) {}
+        throw new Error(
+          'retro_load_game() trapped in WASM (' + wasmErr.message + '). ' +
+          'Hardware-rendered N64 cores need _emscripten_GetProcAddress exported — ' +
+          'rebuild:  scripts/build-core.sh n64wasm'
+        );
+      }
       M._free(infoPtr);
       if (pathPtr) M._free(pathPtr);
       // The core has already opened (and typically fully read) the file.
@@ -894,6 +953,15 @@ class LibretroAdapter {
         // pointer was call_indirect-ed: rglgen_resolve_symbols() filled the
         // pointer table with 0s because get_proc_address had no resolver.
         // Fix: rebuild the core so _emscripten_GetProcAddress is exported.
+        console.error('[LibretroAdapter] retro_load_game() trapped in WASM.');
+        console.error('  error message :', wasmErr.message);
+        console.error('  stack         :', wasmErr.stack ?? '(no stack)');
+        console.error('  hwRender      :', this._hwRender);
+        console.error('  hwContextReset:', this._hwContextReset);
+        console.error('  _emscripten_GetProcAddress (glue)  :', typeof M._emscripten_GetProcAddress);
+        console.error('  _wasmExports.emscripten_GetProcAddress (raw):', typeof M._wasmExports?.emscripten_GetProcAddress);
+        console.error('  addFunction   :', typeof M.addFunction);
+        console.error('  table         :', M.wasmTable ? 'wasmTable' : M.__indirect_function_table ? '__indirect_function_table' : 'NONE');
         M._free(infoPtr);
         if (pathPtr) M._free(pathPtr);
         M._free(romPtr);
