@@ -126,6 +126,7 @@ class LibretroAdapter {
       let _capturedMem       = null;
       let _capturedTable     = null;
       let _capturedExports   = null;   // raw WASM instance exports (superset of Module._xxx)
+      let _capturedWasm      = null;   // WASM binary ArrayBuffer (captured from fallback ArrayBuffer path)
       const _origInst        = WebAssembly.instantiate;
       const _origInstS       = WebAssembly.instantiateStreaming;
       const _restoreWA       = () => {
@@ -151,6 +152,8 @@ class LibretroAdapter {
       };
       WebAssembly.instantiate = (source, imports) => {
         _captureMem(imports);
+        // Capture the raw binary when streaming compile falls back to ArrayBuffer.
+        if (!_capturedWasm && source instanceof ArrayBuffer) _capturedWasm = source;
         return _origInst.call(WebAssembly, source, imports).then(result => {
           _captureTable(result?.instance?.exports);
           return result;
@@ -211,6 +214,9 @@ class LibretroAdapter {
           // wrappers for them (that only happens for EXPORTED_FUNCTIONS entries).
           if (_capturedExports && !live._wasmExports) {
             live._wasmExports = _capturedExports;
+          }
+          if (_capturedWasm && !live._wasmBinary) {
+            live._wasmBinary = _capturedWasm;
           }
 
           // ── Debug: surface export availability for GL proc-address diagnosis ─
@@ -318,6 +324,84 @@ class LibretroAdapter {
     this._callbacks = {};
 
     this._registerCallbacks();
+  }
+
+  // ── Static WASM diagnostics ──────────────────────────────────────────────────
+
+  /**
+   * Minimal WASM binary parser: reads the call_indirect type at byte offset
+   * `fileOff` (from file start) and returns a human-readable string like
+   * "(i32, i32) → void".  Used in catch blocks after a signature-mismatch trap.
+   */
+  static _parseCallIndirectType(wasmBuf, fileOff) {
+    const b = new Uint8Array(wasmBuf);
+    // LEB128 unsigned decoder — returns [value, nextOffset]
+    function uleb(p) {
+      let r = 0, s = 0, x;
+      do { x = b[p++]; r |= (x & 0x7F) << s; s += 7; } while (x & 0x80);
+      return [r, p];
+    }
+    const wt = { 0x7F: 'i32', 0x7E: 'i64', 0x7D: 'f32', 0x7C: 'f64' };
+    if (b[fileOff] !== 0x11) {
+      return `byte 0x${b[fileOff]?.toString(16) ?? '??'} at 0x${fileOff.toString(16)} (expected 0x11=call_indirect)`;
+    }
+    const [typeIdx] = uleb(fileOff + 1);
+    let p = 8; // skip magic + version
+    while (p < b.length) {
+      const sid = b[p++];
+      const [slen, p2] = uleb(p);
+      if (sid === 1) { // Type section
+        let tp = p2;
+        const [, tp2] = uleb(tp); tp = tp2; // skip type count
+        for (let i = 0; i <= typeIdx; i++) {
+          if (b[tp++] !== 0x60) return `type[${typeIdx}]: expected 0x60 marker at #${i}`;
+          const [np, tp3] = uleb(tp); tp = tp3;
+          const params = [...b.slice(tp, tp + np)].map(v => wt[v] ?? `0x${v.toString(16)}`); tp += np;
+          const [nr, tp4] = uleb(tp); tp = tp4;
+          const rets  = [...b.slice(tp, tp + nr)].map(v => wt[v] ?? `0x${v.toString(16)}`); tp += nr;
+          if (i === typeIdx) {
+            return `type[${typeIdx}]: (${params.join(', ')}) → ${rets.join(', ') || 'void'}`;
+          }
+        }
+        return `typeIdx ${typeIdx} out of range`;
+      }
+      p = p2 + slen;
+    }
+    return 'Type section not found in binary';
+  }
+
+  /**
+   * Log the WASM type of every registered callback by reading it back from the
+   * function table.  WebAssembly.Function#type() is part of the Type Reflection
+   * proposal (Chrome 95+, Firefox 91+) and returns { parameters, results }.
+   */
+  _logCallbackTypes(label = '') {
+    const M = this.M;
+    const tbl = M.wasmTable ?? M.__indirect_function_table;
+    const entries = {
+      env:         this._callbacks?.env,
+      video:       this._callbacks?.video,
+      audioSample: this._callbacks?.audioSample,
+      audioBatch:  this._callbacks?.audioBatch,
+      inputPoll:   this._callbacks?.inputPoll,
+      inputState:  this._callbacks?.inputState,
+      fboFn:       this._hwFboFn,
+      procFn:      this._hwProcFn,
+    };
+    for (const [name, idx] of Object.entries(entries)) {
+      if (typeof idx !== 'number') continue;
+      try {
+        const fn = tbl?.get(idx);
+        let typeStr = '(type() N/A)';
+        if (fn && typeof fn.type === 'function') {
+          const t = fn.type();
+          typeStr = `(${(t.parameters ?? []).join(', ')}) → ${(t.results ?? []).join(', ') || 'void'}`;
+        }
+        console.error(`  ${label}callback.${name} idx=${idx} type=${typeStr}`);
+      } catch (e) {
+        console.error(`  ${label}callback.${name} idx=${idx} type-check threw: ${e.message}`);
+      }
+    }
   }
 
   // ── Callback registration ────────────────────────────────────────────────────
@@ -440,6 +524,15 @@ class LibretroAdapter {
     M._retro_set_audio_sample_batch(this._callbacks.audioBatch);
     M._retro_set_input_poll(this._callbacks.inputPoll);
     M._retro_set_input_state(this._callbacks.inputState);
+
+    console.log('[LibretroAdapter] callbacks registered:',
+      'env='        + this._callbacks.env,
+      'video='      + this._callbacks.video,
+      'audioSample='+ this._callbacks.audioSample,
+      'audioBatch=' + this._callbacks.audioBatch,
+      'inputPoll='  + this._callbacks.inputPoll,
+      'inputState=' + this._callbacks.inputState,
+    );
 
     M._retro_init();
   }
@@ -657,6 +750,8 @@ class LibretroAdapter {
 
         this._hwRender       = true;
         this._hwContextReset = ctxReset;
+        this._hwFboFn        = fboFn;
+        this._hwProcFn       = procFn;
         return true;
       }
 
@@ -937,15 +1032,22 @@ class LibretroAdapter {
         console.error('  stack         :', wasmErr.stack ?? '(no stack)');
         console.error('  hwRender      :', this._hwRender);
         console.error('  hwContextReset:', this._hwContextReset);
-        console.error('  _emscripten_GetProcAddress (glue)  :', typeof M._emscripten_GetProcAddress);
-        console.error('  _wasmExports.emscripten_GetProcAddress (raw):', typeof M._wasmExports?.emscripten_GetProcAddress);
+        // Parse the WASM binary to reveal the exact call_indirect type at the trap offset.
+        if (M._wasmBinary) {
+          try {
+            console.error('  call_indirect[0x17f489]:',
+              LibretroAdapter._parseCallIndirectType(M._wasmBinary, 0x17f489));
+          } catch (pe) { console.error('  WASM parse error:', pe.message); }
+        } else {
+          console.error('  _wasmBinary: not captured — run with streaming disabled to capture');
+        }
+        this._logCallbackTypes('FS ');
         M._free(infoPtr);
         if (pathPtr) M._free(pathPtr);
         try { FS.unlink(virtPath); } catch (_) {}
         throw new Error(
           'retro_load_game() trapped in WASM (' + wasmErr.message + '). ' +
-          'Hardware-rendered N64 cores need _emscripten_GetProcAddress exported — ' +
-          'rebuild:  scripts/build-core.sh n64wasm'
+          'See call_indirect / callback type info above for root cause.'
         );
       }
       M._free(infoPtr);
@@ -984,26 +1086,27 @@ class LibretroAdapter {
       try {
         ok = M._retro_load_game(infoPtr);
       } catch (wasmErr) {
-        // A WASM RuntimeError here almost always means a null GL function
-        // pointer was call_indirect-ed: rglgen_resolve_symbols() filled the
-        // pointer table with 0s because get_proc_address had no resolver.
-        // Fix: rebuild the core so _emscripten_GetProcAddress is exported.
         console.error('[LibretroAdapter] retro_load_game() trapped in WASM.');
         console.error('  error message :', wasmErr.message);
         console.error('  stack         :', wasmErr.stack ?? '(no stack)');
         console.error('  hwRender      :', this._hwRender);
         console.error('  hwContextReset:', this._hwContextReset);
-        console.error('  _emscripten_GetProcAddress (glue)  :', typeof M._emscripten_GetProcAddress);
-        console.error('  _wasmExports.emscripten_GetProcAddress (raw):', typeof M._wasmExports?.emscripten_GetProcAddress);
-        console.error('  addFunction   :', typeof M.addFunction);
-        console.error('  table         :', M.wasmTable ? 'wasmTable' : M.__indirect_function_table ? '__indirect_function_table' : 'NONE');
+        // Parse the WASM binary to reveal the exact call_indirect type at the trap offset.
+        if (M._wasmBinary) {
+          try {
+            console.error('  call_indirect[0x17f489]:',
+              LibretroAdapter._parseCallIndirectType(M._wasmBinary, 0x17f489));
+          } catch (pe) { console.error('  WASM parse error:', pe.message); }
+        } else {
+          console.error('  _wasmBinary: not captured — run with streaming disabled to capture');
+        }
+        this._logCallbackTypes();
         M._free(infoPtr);
         if (pathPtr) M._free(pathPtr);
         M._free(romPtr);
         throw new Error(
           'retro_load_game() trapped in WASM (' + wasmErr.message + '). ' +
-          'Hardware-rendered N64 cores need _emscripten_GetProcAddress exported — ' +
-          'rebuild:  scripts/build-core.sh n64wasm'
+          'See call_indirect / callback type info above for root cause.'
         );
       }
       M._free(infoPtr);
