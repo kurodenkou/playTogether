@@ -221,7 +221,7 @@ class LibretroAdapter {
             const _tableSlot = live.wasmTable ? 'wasmTable'
                              : live.__indirect_function_table ? '__indirect_function_table'
                              : 'NONE';
-            console.debug(
+            console.log(
               '[LibretroAdapter] Core ready.' ,
               '| _emscripten_GetProcAddress (JS glue):', _hasGlue,
               '| (raw WASM export):', _hasRaw,
@@ -548,7 +548,7 @@ class LibretroAdapter {
         const GL = M.GL;
 
         // Debug: log what's available before choosing a resolution strategy.
-        console.debug(
+        console.log(
           '[LibretroAdapter] SET_HW_RENDER ctxType=' + ctxType + ' ctxReset=' + ctxReset,
           '| _emscripten_GetProcAddress (glue):', typeof M._emscripten_GetProcAddress,
           '| _wasmExports.emscripten_GetProcAddress (raw):', typeof M._wasmExports?.emscripten_GetProcAddress,
@@ -578,19 +578,27 @@ class LibretroAdapter {
         const _glProcResolve = (() => {
           if (_rawGetProcAddr) {
             const _path = typeof M._emscripten_GetProcAddress === 'function' ? 1 : 2;
-            console.debug('[LibretroAdapter] get_proc_address: using Path ' + _path +
+            console.log('[LibretroAdapter] get_proc_address: using Path ' + _path +
               ' (' + (_path === 1 ? 'Module._emscripten_GetProcAddress' : '_wasmExports direct') + ')');
             let _callCount = 0;
+            let _zeroCount = 0;
             // Paths 1 & 2: pass the C string pointer directly to the WASM function.
             return (namePtr) => {
               const result = _rawGetProcAddr(namePtr) | 0;
               if (_callCount < 20) {
                 try {
-                  console.debug('[LibretroAdapter] get_proc_address[' + _callCount + ']',
+                  console.log('[LibretroAdapter] get_proc_address[' + _callCount + ']',
                     M.UTF8ToString(namePtr), '→', result);
                 } catch (_) {}
               } else if (_callCount === 20) {
-                console.debug('[LibretroAdapter] get_proc_address: (further calls suppressed)');
+                console.log('[LibretroAdapter] get_proc_address: (further calls suppressed)');
+              }
+              if (result === 0) {
+                _zeroCount++;
+                try {
+                  console.warn('[LibretroAdapter] get_proc_address: ZERO index for',
+                    M.UTF8ToString(namePtr), '— this GL fn is unresolved and will trap on call_indirect');
+                } catch (_) {}
               }
               _callCount++;
               return result;
@@ -601,7 +609,7 @@ class LibretroAdapter {
                         ?? GL?.getWebGLProcAddress?.bind(GL)
                         ?? GL?.procAddressLookup?.bind(GL);
           if (typeof glLookup === 'function') {
-            console.debug('[LibretroAdapter] get_proc_address: using Path 3 (GL internal API)');
+            console.log('[LibretroAdapter] get_proc_address: using Path 3 (GL internal API)');
             return (namePtr) => {
               const name = M.UTF8ToString(namePtr);
               if (name in glProcCache) return glProcCache[name];
@@ -619,6 +627,33 @@ class LibretroAdapter {
         })();
         const procFn = this._addFn(_glProcResolve, 'ii');
         M.HEAPU32[(data + 12) >> 2] = procFn;
+        console.log('[LibretroAdapter] procFn registered at table index', procFn,
+          '| fboFn at', fboFn);
+
+        // Sanity-probe: call _glProcResolve directly from JS with a well-known GL
+        // symbol to verify it returns a non-zero table index before retro_load_game
+        // runs.  A zero result means emscripten_GetProcAddress can't find the symbol
+        // (it's absent from the -lGL build) and every call_indirect through it will
+        // produce "function signature mismatch".
+        try {
+          const _probe = (name) => {
+            const enc  = new TextEncoder().encode(name + '\0');
+            const ptr  = M._malloc(enc.length);
+            if (!ptr) return null;
+            M.HEAPU8.set(enc, ptr);
+            const idx  = _glProcResolve(ptr);
+            M._free(ptr);
+            return idx;
+          };
+          const probes = ['glActiveTexture', 'glBindTexture', 'glDrawElements', 'glGetError'];
+          for (const name of probes) {
+            const idx = _probe(name);
+            console.log('[LibretroAdapter] probe', name, '→', idx,
+              idx === 0 ? '⚠ ZERO — missing from -lGL build' : '✓');
+          }
+        } catch (probeErr) {
+          console.warn('[LibretroAdapter] proc address probe threw:', probeErr);
+        }
 
         this._hwRender       = true;
         this._hwContextReset = ctxReset;
