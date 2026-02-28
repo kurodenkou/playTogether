@@ -126,7 +126,8 @@ class LibretroAdapter {
       let _capturedMem       = null;
       let _capturedTable     = null;
       let _capturedExports   = null;   // raw WASM instance exports (superset of Module._xxx)
-      let _capturedWasm      = null;   // WASM binary ArrayBuffer (captured from fallback ArrayBuffer path)
+      let _capturedWasm      = null;   // WASM binary ArrayBuffer (captured from fallback path)
+      let _capturedModule    = null;   // WebAssembly.Module object (for custom-section inspection)
       const _origInst        = WebAssembly.instantiate;
       const _origInstS       = WebAssembly.instantiateStreaming;
       const _restoreWA       = () => {
@@ -150,12 +151,24 @@ class LibretroAdapter {
         // JS glue did NOT wrap (i.e. absent from EXPORTED_FUNCTIONS).
         if (!_capturedExports && exports) _capturedExports = exports;
       };
+      // Helper: capture the WASM binary bytes from either an ArrayBuffer or any
+      // TypedArray view (Uint8Array etc.).  Single-file Emscripten builds embed
+      // the WASM as a base64 data-URI and decode it to a Uint8Array before
+      // calling WebAssembly.instantiate, so we must handle both forms.
+      const _captureWasmBinary = (source) => {
+        if (_capturedWasm) return;
+        if (source instanceof ArrayBuffer) {
+          _capturedWasm = source;
+        } else if (ArrayBuffer.isView(source) && source.buffer instanceof ArrayBuffer) {
+          _capturedWasm = source.buffer.slice(source.byteOffset, source.byteOffset + source.byteLength);
+        }
+      };
       WebAssembly.instantiate = (source, imports) => {
         _captureMem(imports);
-        // Capture the raw binary when streaming compile falls back to ArrayBuffer.
-        if (!_capturedWasm && source instanceof ArrayBuffer) _capturedWasm = source;
+        _captureWasmBinary(source);
         return _origInst.call(WebAssembly, source, imports).then(result => {
           _captureTable(result?.instance?.exports);
+          if (!_capturedModule) _capturedModule = result?.module;
           return result;
         });
       };
@@ -163,6 +176,7 @@ class LibretroAdapter {
         _captureMem(imports);
         return _origInstS.call(WebAssembly, source, imports).then(result => {
           _captureTable(result?.instance?.exports);
+          if (!_capturedModule) _capturedModule = result?.module;
           return result;
         });
       };
@@ -217,6 +231,9 @@ class LibretroAdapter {
           }
           if (_capturedWasm && !live._wasmBinary) {
             live._wasmBinary = _capturedWasm;
+          }
+          if (_capturedModule && !live._wasmModule) {
+            live._wasmModule = _capturedModule;
           }
 
           // ── Debug: surface export availability for GL proc-address diagnosis ─
@@ -327,6 +344,44 @@ class LibretroAdapter {
   }
 
   // ── Static WASM diagnostics ──────────────────────────────────────────────────
+
+  /**
+   * Parse the WASM 'name' custom section from a WebAssembly.Module and return
+   * the name of the function at the given function index, or null if not found.
+   * The 'name' section is emitted by emcc with -g / --profiling-funcs; if it's
+   * absent the return value is null and the caller should fall back to the index.
+   */
+  static _wasmFunctionName(module, funcIdx) {
+    if (!(module instanceof WebAssembly.Module)) return null;
+    let sections;
+    try { sections = WebAssembly.Module.customSections(module, 'name'); }
+    catch (_) { return null; }
+    if (!sections?.length) return null;
+    const b = new Uint8Array(sections[0]);
+    function uleb(p) {
+      let r = 0, s = 0, x;
+      do { x = b[p++]; r |= (x & 0x7F) << s; s += 7; } while (x & 0x80);
+      return [r, p];
+    }
+    let p = 0;
+    while (p < b.length) {
+      const sub = b[p++];
+      const [slen, p2] = uleb(p); p = p2;
+      const end = p + slen;
+      if (sub === 1) { // function names subsection
+        const [count, p3] = uleb(p); p = p3;
+        for (let i = 0; i < count && p < end; i++) {
+          const [idx,  p4] = uleb(p);  p = p4;
+          const [nlen, p5] = uleb(p);  p = p5;
+          const name = new TextDecoder().decode(b.slice(p, p + nlen)); p += nlen;
+          if (idx === funcIdx) return name;
+        }
+        return null; // not in section
+      }
+      p = end; // skip other subsections
+    }
+    return null;
+  }
 
   /**
    * Minimal WASM binary parser: reads the call_indirect type at byte offset
@@ -1032,14 +1087,18 @@ class LibretroAdapter {
         console.error('  stack         :', wasmErr.stack ?? '(no stack)');
         console.error('  hwRender      :', this._hwRender);
         console.error('  hwContextReset:', this._hwContextReset);
-        // Parse the WASM binary to reveal the exact call_indirect type at the trap offset.
+        // Identify the failing call_indirect and the function that contains it.
+        {
+          const fnName = LibretroAdapter._wasmFunctionName(M._wasmModule, 3375);
+          console.error('  wasm-function[3375] name:', fnName ?? '(name section absent — build with -g or --profiling-funcs)');
+        }
         if (M._wasmBinary) {
           try {
             console.error('  call_indirect[0x17f489]:',
               LibretroAdapter._parseCallIndirectType(M._wasmBinary, 0x17f489));
           } catch (pe) { console.error('  WASM parse error:', pe.message); }
         } else {
-          console.error('  _wasmBinary: not captured — run with streaming disabled to capture');
+          console.error('  _wasmBinary: not captured (single-file build? try providing a separate wasmUrl)');
         }
         this._logCallbackTypes('FS ');
         M._free(infoPtr);
@@ -1091,14 +1150,18 @@ class LibretroAdapter {
         console.error('  stack         :', wasmErr.stack ?? '(no stack)');
         console.error('  hwRender      :', this._hwRender);
         console.error('  hwContextReset:', this._hwContextReset);
-        // Parse the WASM binary to reveal the exact call_indirect type at the trap offset.
+        // Identify the failing call_indirect and the function that contains it.
+        {
+          const fnName = LibretroAdapter._wasmFunctionName(M._wasmModule, 3375);
+          console.error('  wasm-function[3375] name:', fnName ?? '(name section absent — build with -g or --profiling-funcs)');
+        }
         if (M._wasmBinary) {
           try {
             console.error('  call_indirect[0x17f489]:',
               LibretroAdapter._parseCallIndirectType(M._wasmBinary, 0x17f489));
           } catch (pe) { console.error('  WASM parse error:', pe.message); }
         } else {
-          console.error('  _wasmBinary: not captured — run with streaming disabled to capture');
+          console.error('  _wasmBinary: not captured (single-file build? try providing a separate wasmUrl)');
         }
         this._logCallbackTypes();
         M._free(infoPtr);
