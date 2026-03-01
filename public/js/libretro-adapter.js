@@ -820,6 +820,18 @@ class LibretroAdapter {
           glObjectPtrLabel:        'viii',    // void(const void* ptr, GLsizei len, const GLchar* label)
           glGetObjectLabel:        'viiiii',  // void(GLenum id, GLuint name, GLsizei bufSz, GLsizei* len, GLchar* label)
           glGetObjectPtrLabel:     'viiii',   // void(const void* ptr, GLsizei bufSz, GLsizei* len, GLchar* label)
+          // Indexed per-buffer GL 3.x / OpenGL 4.0 functions — not exposed by
+          // Emscripten's proc address resolver unless built with FULL_ES3.
+          // Hardware-rendered cores (e.g. GLideN64) probe these; a ZERO table
+          // index causes a call_indirect trap, so register harmless no-ops.
+          glDisablei:              'vii',    // void(GLenum cap, GLuint index)
+          glEnablei:               'vii',    // void(GLenum cap, GLuint index)
+          glIsEnabledi:            'iii',    // GLboolean(GLenum cap, GLuint index)
+          glColorMaski:            'viiiii', // void(GLuint buf, GLboolean r, g, b, a)
+          glBlendEquationi:        'vii',    // void(GLuint buf, GLenum mode)
+          glBlendEquationSeparatei:'viii',   // void(GLuint buf, GLenum modeRGB, modeAlpha)
+          glBlendFunci:            'viii',   // void(GLuint buf, GLenum src, GLenum dst)
+          glBlendFuncSeparatei:    'viiiii', // void(GLuint buf, GLenum srcRGB, dstRGB, srcA, dstA)
         };
         // Cache: function name → registered table index (created on first zero hit).
         const _noopStubCache = Object.create(null);
@@ -1373,12 +1385,28 @@ class LibretroAdapter {
         if (typeof M.GL.makeContextCurrent === 'function') {
           M.GL.makeContextCurrent(this._glHandle);
         }
-        // Belt-and-suspenders: makeContextCurrent may be a no-op in some builds,
-        // or may leave currentContext without a .version field.  Write the context
-        // directly so emscriptenWebGLGet can always read .version and GLctx.
+        // Belt-and-suspenders: makeContextCurrent may have done a lookup miss
+        // (setting GL.currentContext = undefined) if the core re-initialised
+        // GL.contexts since SET_HW_RENDER.  Build a synthetic entry, re-insert
+        // it so makeContextCurrent can find it (which also updates the
+        // closure-captured GLctx used by every _emscripten_glXxx stub), then
+        // fall back to a direct assignment if makeContextCurrent is absent.
         if (!M.GL.currentContext?.version) {
-          M.GL.currentContext = M.GL.contexts?.[this._glHandle] ?? null;
-          if (this._glContext) M['ctx'] = this._glContext;
+          const synth = M.GL.contexts?.[this._glHandle] ?? {
+            handle: this._glHandle,
+            attributes: { majorVersion: 2, minorVersion: 0 },
+            version: 2,
+            GLctx: this._glContext,
+          };
+          M.GL.contexts = M.GL.contexts ?? {};
+          M.GL.contexts[this._glHandle] = synth;
+          if (typeof M.GL.makeContextCurrent === 'function') {
+            M.GL.makeContextCurrent(this._glHandle);
+          }
+          if (!M.GL.currentContext?.version) {
+            M.GL.currentContext = synth;
+            if (this._glContext) M['ctx'] = this._glContext;
+          }
         }
       }
       const table = M.wasmTable ?? M.__indirect_function_table;
@@ -1430,11 +1458,32 @@ class LibretroAdapter {
     // or by the core calling emscripten_webgl_make_context_current(0) internally.
     if (this._hwRender && this._glHandle) {
       const gl = this.M.GL;
-      if (gl && typeof gl.makeContextCurrent === 'function') {
-        gl.makeContextCurrent(this._glHandle);
-      } else if (gl && !gl.currentContext) {
-        gl.currentContext = gl.contexts?.[this._glHandle] ?? null;
-        if (this._glContext) this.M['ctx'] = this._glContext;
+      if (gl) {
+        if (typeof gl.makeContextCurrent === 'function') {
+          gl.makeContextCurrent(this._glHandle);
+        }
+        // makeContextCurrent may have silently failed (lookup miss sets
+        // GL.currentContext = undefined and GLctx = undefined), causing
+        // _emscripten_glXxx stubs to throw on the next retro_run() frame.
+        // Re-insert a synthetic entry and retry so both GL.currentContext
+        // and the closure-captured GLctx are restored.
+        if (!gl.currentContext?.version) {
+          const synth = gl.contexts?.[this._glHandle] ?? {
+            handle: this._glHandle,
+            attributes: { majorVersion: 2, minorVersion: 0 },
+            version: 2,
+            GLctx: this._glContext,
+          };
+          gl.contexts = gl.contexts ?? {};
+          gl.contexts[this._glHandle] = synth;
+          if (typeof gl.makeContextCurrent === 'function') {
+            gl.makeContextCurrent(this._glHandle);
+          }
+          if (!gl.currentContext?.version) {
+            gl.currentContext = synth;
+            if (this._glContext) this.M['ctx'] = this._glContext;
+          }
+        }
       }
     }
 
