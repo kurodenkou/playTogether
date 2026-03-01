@@ -1446,6 +1446,17 @@ class LibretroAdapter {
         try { table.get(this._hwContextReset)(); }
         catch (e) { console.error('[LibretroAdapter] context_reset threw:', e); }
       }
+      // After context_reset, the core may have activated its own GL context handle
+      // (via emscripten_webgl_make_context_current internally).  Capture whatever
+      // handle is now active so step() can re-activate it before each retro_run().
+      // This works even when Module.GL is not exposed (newer Emscripten builds).
+      if (typeof M._emscripten_webgl_get_current_context === 'function') {
+        const h = M._emscripten_webgl_get_current_context();
+        if (h > 0) {
+          this._glHandle = h;
+          console.log('[LibretroAdapter] captured GL handle after context_reset:', h);
+        }
+      }
     }
 
     this._romLoaded = true;
@@ -1491,6 +1502,14 @@ class LibretroAdapter {
     // Guard on _glContext (not _glHandle) so we can lazily acquire the handle if
     // M.GL was absent at SET_HW_RENDER time but has been lazy-initialised since.
     if (this._hwRender && this._glContext) {
+      // Re-activate via the exported C API first.  This is the most reliable
+      // approach: the function lives inside the module's own closure so it
+      // always updates the closure-captured GLctx variable, and works even
+      // when Module.GL is not exposed (some newer Emscripten builds omit it).
+      if (this._glHandle &&
+          typeof this.M._emscripten_webgl_make_context_current === 'function') {
+        this.M._emscripten_webgl_make_context_current(this._glHandle);
+      }
       const gl = this.M.GL;
       // If the handle is still unset (M.GL was absent at SET_HW_RENDER but has
       // since been lazy-initialised by the core), register the context now.
