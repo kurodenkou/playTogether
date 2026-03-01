@@ -1468,6 +1468,61 @@ class LibretroAdapter {
           }
         }
       }
+
+      // ── C-API fallback ────────────────────────────────────────────────────────
+      // If M.GL is not exposed (the Emscripten build keeps it as a private closure
+      // variable and never assigns Module.GL = GL), every `if (M.GL …)` block
+      // above was skipped and GL.currentContext is still null.  The C-API
+      // functions (_emscripten_webgl_create_context,
+      // _emscripten_webgl_make_context_current) are JS stubs that live inside the
+      // same closure, so calling them from outside DOES reach the internal GL
+      // object and correctly sets GL.currentContext / GLctx.
+      //
+      // We call _emscripten_webgl_create_context(0, attrsPtr):
+      //   • target=0 → findCanvasEventTarget(UTF8ToString(0)) → findCanvasEventTarget("")
+      //     → !target branch → Module.canvas (which we set early in _registerCallbacks)
+      //   • attrsPtr points to an EmscriptenWebGLContextAttributes struct written
+      //     into WASM heap with majorVersion=2.
+      //   • GL.createContext calls canvas.getContext('webgl2', attrs); the browser
+      //     returns the existing context for this canvas (same object as _glContext).
+      //   • GL.registerContext assigns a handle and stores the entry in GL.contexts.
+      //   • We then make_context_current(h) → GL.currentContext = GL.contexts[h].
+      if (!this._glHandle && this._glContext &&
+          typeof M._emscripten_webgl_create_context === 'function' &&
+          typeof M._emscripten_webgl_make_context_current === 'function' &&
+          typeof M._malloc === 'function' && M.HEAPU8 && M.HEAP32) {
+        try {
+          // EmscriptenWebGLContextAttributes: 14 × int32 = 56 bytes.
+          // Byte offsets of relevant fields:
+          //   0  alpha,  4  depth,  8  stencil, 12  antialias,
+          //  16  premultipliedAlpha, 20  preserveDrawingBuffer,
+          //  24  powerPreference,   28  failIfMajorPerformanceCaveat,
+          //  32  majorVersion,      36  minorVersion,
+          //  40  enableExtensionsByDefault, …
+          const attrPtr = M._malloc(56);
+          if (attrPtr) {
+            M.HEAPU8.fill(0, attrPtr, attrPtr + 56);   // zero all fields
+            M.HEAP32[(attrPtr +  0) >> 2] = 1;         // alpha = true
+            M.HEAP32[(attrPtr +  4) >> 2] = 1;         // depth = true
+            M.HEAP32[(attrPtr + 32) >> 2] = 2;         // majorVersion = 2
+            M.HEAP32[(attrPtr + 40) >> 2] = 1;         // enableExtensionsByDefault
+            if (!M.canvas) M.canvas = this.canvas;     // ensure findCanvasEventTarget(0) works
+            const h = M._emscripten_webgl_create_context(0, attrPtr);
+            M._free?.(attrPtr);
+            if (h > 0) {
+              this._glHandle = h;
+              M._emscripten_webgl_make_context_current(h);
+              console.log('[LibretroAdapter] C-API GL context registered, handle:', h);
+            } else {
+              console.warn('[LibretroAdapter] _emscripten_webgl_create_context returned 0' +
+                ' (Module.canvas:', M.canvas, ')');
+            }
+          }
+        } catch (cApiErr) {
+          console.warn('[LibretroAdapter] C-API GL context setup failed:', cApiErr);
+        }
+      }
+
       const table = M.wasmTable ?? M.__indirect_function_table;
       if (table) {
         try { table.get(this._hwContextReset)(); }
