@@ -712,10 +712,14 @@ class LibretroAdapter {
         if (M.GL) {
           if (!M.canvas) M.canvas = this.canvas;
           if (typeof M.GL.registerContext === 'function') {
-            const h = M.GL.registerContext(gl, { majorVersion: 2, minorVersion: 0 });
-            if (h) {
-              M.GL.makeContextCurrent(h);
-              this._glHandle = h;
+            try {
+              const h = M.GL.registerContext(gl, { majorVersion: 2, minorVersion: 0 });
+              if (h) {
+                M.GL.makeContextCurrent(h);
+                this._glHandle = h;
+              }
+            } catch (_regErr) {
+              console.warn('[LibretroAdapter] GL.registerContext threw:', _regErr);
             }
           }
           // Fallback: registerContext may be absent (newer Emscripten) or may have
@@ -726,7 +730,7 @@ class LibretroAdapter {
             // Use getNewId if available so we don't collide with a handle the
             // core already registered internally.
             const h = typeof M.GL.getNewId === 'function'
-              ? M.GL.getNewId(M.GL.contexts)
+              ? M.GL.getNewId(M.GL.contexts ?? {})
               : 1;
             M.GL.contexts = M.GL.contexts ?? {};
             M.GL.contexts[h] = {
@@ -734,6 +738,7 @@ class LibretroAdapter {
               attributes: { majorVersion: 2, minorVersion: 0 },
               version: 2,
               GLctx: gl,
+              initExtensionsDone: true,
             };
             if (typeof M.GL.makeContextCurrent === 'function') {
               M.GL.makeContextCurrent(h);
@@ -1372,11 +1377,15 @@ class LibretroAdapter {
           // (Re-)register the WebGL2 context.
           let newHandle = 0;
           if (typeof M.GL.registerContext === 'function') {
-            newHandle = M.GL.registerContext(this._glContext, { majorVersion: 2, minorVersion: 0 });
+            try {
+              newHandle = M.GL.registerContext(this._glContext, { majorVersion: 2, minorVersion: 0 }) || 0;
+            } catch (_regErr) {
+              console.warn('[LibretroAdapter] GL.registerContext threw (context_reset):', _regErr);
+            }
           }
           if (!newHandle) {
             newHandle = typeof M.GL.getNewId === 'function'
-              ? M.GL.getNewId(M.GL.contexts)
+              ? M.GL.getNewId(M.GL.contexts ?? {})
               : (this._glHandle || 1);
             M.GL.contexts = M.GL.contexts ?? {};
             M.GL.contexts[newHandle] = {
@@ -1384,6 +1393,7 @@ class LibretroAdapter {
               attributes: { majorVersion: 2, minorVersion: 0 },
               version: 2,
               GLctx: this._glContext,
+              initExtensionsDone: true,
             };
           }
           this._glHandle = newHandle;
@@ -1408,11 +1418,22 @@ class LibretroAdapter {
             attributes: { majorVersion: 2, minorVersion: 0 },
             version: 2,
             GLctx: this._glContext,
+            initExtensionsDone: true,
           };
+          // Ensure synth has the flag so makeContextCurrent won't call initExtensions.
+          if (!synth.initExtensionsDone) synth.initExtensionsDone = true;
           M.GL.contexts = M.GL.contexts ?? {};
           M.GL.contexts[this._glHandle] = synth;
           if (typeof M.GL.makeContextCurrent === 'function') {
             M.GL.makeContextCurrent(this._glHandle);
+          }
+          // Also try the exported C-API function: it is defined inside the module's
+          // own closure and therefore updates the closure-captured GLctx variable
+          // that every _emscripten_glXxx stub reads (plain M.GL.currentContext
+          // assignment cannot do this).
+          if (!M.GL.currentContext?.version &&
+              typeof M._emscripten_webgl_make_context_current === 'function') {
+            M._emscripten_webgl_make_context_current(this._glHandle);
           }
           if (!M.GL.currentContext?.version) {
             M.GL.currentContext = synth;
@@ -1467,9 +1488,31 @@ class LibretroAdapter {
     // context before retro_run() issues any _emscripten_glXxx calls.
     // GL.currentContext / GLctx can be cleared by browser task-scheduler boundaries
     // or by the core calling emscripten_webgl_make_context_current(0) internally.
-    if (this._hwRender && this._glHandle) {
+    // Guard on _glContext (not _glHandle) so we can lazily acquire the handle if
+    // M.GL was absent at SET_HW_RENDER time but has been lazy-initialised since.
+    if (this._hwRender && this._glContext) {
       const gl = this.M.GL;
-      if (gl) {
+      // If the handle is still unset (M.GL was absent at SET_HW_RENDER but has
+      // since been lazy-initialised by the core), register the context now.
+      if (!this._glHandle && gl) {
+        try {
+          if (typeof gl.registerContext === 'function') {
+            const h = gl.registerContext(this._glContext, { majorVersion: 2, minorVersion: 0 }) || 0;
+            if (h) this._glHandle = h;
+          }
+          if (!this._glHandle) {
+            const h = typeof gl.getNewId === 'function'
+              ? gl.getNewId(gl.contexts ?? {}) : 1;
+            gl.contexts = gl.contexts ?? {};
+            gl.contexts[h] = {
+              handle: h, attributes: { majorVersion: 2, minorVersion: 0 },
+              version: 2, GLctx: this._glContext, initExtensionsDone: true,
+            };
+            this._glHandle = h;
+          }
+        } catch (_lazyErr) { /* best-effort */ }
+      }
+      if (gl && this._glHandle) {
         if (typeof gl.makeContextCurrent === 'function') {
           gl.makeContextCurrent(this._glHandle);
         }
@@ -1484,11 +1527,18 @@ class LibretroAdapter {
             attributes: { majorVersion: 2, minorVersion: 0 },
             version: 2,
             GLctx: this._glContext,
+            initExtensionsDone: true,
           };
+          if (!synth.initExtensionsDone) synth.initExtensionsDone = true;
           gl.contexts = gl.contexts ?? {};
           gl.contexts[this._glHandle] = synth;
           if (typeof gl.makeContextCurrent === 'function') {
             gl.makeContextCurrent(this._glHandle);
+          }
+          // Also try the exported C-API which updates the closure-captured GLctx.
+          if (!gl.currentContext?.version &&
+              typeof this.M._emscripten_webgl_make_context_current === 'function') {
+            this.M._emscripten_webgl_make_context_current(this._glHandle);
           }
           if (!gl.currentContext?.version) {
             gl.currentContext = synth;
