@@ -575,6 +575,20 @@ class LibretroAdapter {
       'iiiii');
 
     const M = this.M;
+
+    // Expose our canvas to the Emscripten runtime BEFORE retro_set_environment /
+    // retro_init run.  Hardware-rendered cores commonly call
+    // emscripten_webgl_create_context(0, &attrs) during retro_init to set up their
+    // GL context; the internal helper findCanvasEventTarget(0) resolves to
+    // Module.canvas.  If Module.canvas is not set the lookup returns null, context
+    // creation returns handle 0, GL.currentContext stays null, and every subsequent
+    // glXxx call inside context_reset crashes with:
+    //   "Cannot read properties of undefined (reading 'version')"
+    // Setting it unconditionally here — before any core code runs — ensures the
+    // core's WebGL2 context is created on our rendering canvas regardless of whether
+    // M.GL was present when SET_HW_RENDER fired.
+    if (!M.canvas) M.canvas = this.canvas;
+
     M._retro_set_environment(this._callbacks.env);
     M._retro_set_video_refresh(this._callbacks.video);
     M._retro_set_audio_sample(this._callbacks.audioSample);
@@ -1372,6 +1386,19 @@ class LibretroAdapter {
       // undefined (lookup miss), which then causes emscriptenWebGLGet to throw
       // "Cannot read properties of undefined (reading 'version')".
       if (M.GL && this._glContext) {
+        // M.GL may have been lazily initialised by the core during retro_init
+        // (triggered by the core calling emscripten_webgl_create_context(0, attrs)
+        // which now succeeds because M.canvas was set before retro_set_environment).
+        // If so, the core may already have a valid handle registered for our canvas
+        // context.  Reuse that handle rather than registering a duplicate entry
+        // (duplicate entries can shadow extension state the core stored in its handle).
+        if (!this._glHandle && typeof M._emscripten_webgl_get_current_context === 'function') {
+          const ch = M._emscripten_webgl_get_current_context();
+          if (ch > 0 && M.GL.contexts?.[ch]?.GLctx === this._glContext) {
+            this._glHandle = ch;
+            console.log('[LibretroAdapter] reusing core GL handle for context_reset:', ch);
+          }
+        }
         const handleValid = this._glHandle && !!M.GL.contexts?.[this._glHandle];
         if (!handleValid) {
           // (Re-)register the WebGL2 context.
