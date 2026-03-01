@@ -1446,6 +1446,21 @@ class LibretroAdapter {
         M._emscripten_webgl_make_context_current(0);
       }
 
+      // canvas.GLctxObject is set by GL.registerContext in some Emscripten builds
+      // (the property is attached to the canvas element by registerContext so that
+      // the context can be found without going through Module.GL).  When M.GL was
+      // never exposed but the core registered its own context, this gives us the
+      // handle without needing M.GL at all.
+      if (!this._glHandle && this.canvas.GLctxObject) {
+        const ctxObj = this.canvas.GLctxObject;
+        if (ctxObj.GLctx === this._glContext || !this._glContext) {
+          this._glHandle = ctxObj.handle || 0;
+          if (!this._glContext) this._glContext = ctxObj.GLctx;
+          if (this._glHandle)
+            console.log('[LibretroAdapter] found GL handle via canvas.GLctxObject:', this._glHandle);
+        }
+      }
+
       if (M.GL && this._glContext) {
         // M.GL may have been lazily initialised by the core during retro_init
         // (triggered by the core calling emscripten_webgl_create_context(0, attrs)
@@ -1764,7 +1779,16 @@ class LibretroAdapter {
       }
     }
 
-    this.M._retro_run();
+    try {
+      this.M._retro_run();
+    } catch (runErr) {
+      console.error('[LibretroAdapter] retro_run threw:', runErr);
+      // Reset the GL handle so the next frame re-attempts context activation.
+      // This prevents the loop from silently rendering nothing while the handle
+      // is stale; the next step() call will go through the lazy-registration
+      // path again and may succeed once the core finishes its internal GL init.
+      if (this._hwRender) this._glHandle = 0;
+    }
   }
 
   /**
