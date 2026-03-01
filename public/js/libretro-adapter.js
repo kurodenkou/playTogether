@@ -174,6 +174,87 @@ class LibretroAdapter {
           if (_capturedMakeCtxCurrent && _capturedGetCtxCurrent && _capturedCreateCtx) break;
         }
       };
+
+      // ── GL import fixup ───────────────────────────────────────────────────────
+      // Wraps specific Emscripten GL stubs in the WASM import object to validate
+      // and correct parameter values that WebGL2 rejects but desktop GL accepts.
+      //
+      // Problem: some Emscripten builds of hardware-rendered cores (e.g.
+      // mupen64plus-next/GLideN64) call:
+      //   • glBindTexture(GL_TEXTURE_RECTANGLE, …) — target 0x84F5 not in WebGL2
+      //   • glPixelStorei(GL_UNPACK_ALIGNMENT, 0)  — alignment must be 1/2/4/8
+      // These generate silent WebGL validation errors that prevent shaders and
+      // textures from being set up correctly, producing a blank screen.
+      //
+      // Why here (WASM imports) rather than patching GLctx:
+      //   • GL.makeContextCurrent() overwrites GLctx at any time, defeating a
+      //     proxy placed on GLctx.
+      //   • Patching the JS-glue text is fragile with minified builds.
+      //   • The WASM import object is built once before instantiation; wrapping
+      //     these functions here gives every WASM call_indirect through them
+      //     the fixed version for the lifetime of the module.
+      let _bindTexFixCount    = 0;
+      let _pixelStoreFixCount = 0;
+      const _fixupGLImports = (imports) => {
+        const GL_TEXTURE_RECTANGLE = 0x84F5; // NV_texture_rectangle — not in WebGL2
+        const GL_TEXTURE_BUFFER    = 0x8C2A; // not in WebGL2
+        const GL_TEXTURE_1D        = 0x0DE0; // not in WebGL2
+        const GL_TEXTURE_2D        = 0x0DE1;
+        const GL_PACK_ALIGNMENT    = 0x0D05;
+        const GL_UNPACK_ALIGNMENT  = 0x0CF5;
+        const VALID_ALIGN          = new Set([1, 2, 4, 8]);
+
+        for (const ns of Object.values(imports || {})) {
+          if (!ns || typeof ns !== 'object') continue;
+
+          // glBindTexture — map WebGL2-unsupported targets to GL_TEXTURE_2D.
+          // Both underscore and non-underscore variants are checked (Emscripten
+          // ≥ 3.1.41 dropped the leading '_' from WASM import names).
+          for (const key of ['_emscripten_glBindTexture', 'emscripten_glBindTexture']) {
+            if (typeof ns[key] !== 'function') continue;
+            const _orig = ns[key];
+            ns[key] = (target, texture) => {
+              if (target === GL_TEXTURE_RECTANGLE ||
+                  target === GL_TEXTURE_BUFFER   ||
+                  target === GL_TEXTURE_1D) {
+                if (_bindTexFixCount++ < 5) {
+                  console.warn('[LibretroAdapter] GL fixup: glBindTexture target=0x' +
+                    target.toString(16) + ' texture=' + texture +
+                    ' → GL_TEXTURE_2D (unsupported in WebGL2)');
+                }
+                target = GL_TEXTURE_2D;
+              } else if (!target) {
+                if (_bindTexFixCount++ < 5) {
+                  console.warn('[LibretroAdapter] GL fixup: glBindTexture target=0 texture=' +
+                    texture + ' — skipped (uninitialised value; context_reset may have failed)');
+                }
+                return;
+              }
+              return _orig(target, texture);
+            };
+          }
+
+          // glPixelStorei — clamp invalid alignment values to 4.
+          // WebGL2 requires alignment ∈ {1, 2, 4, 8}; desktop OpenGL is stricter
+          // too but some drivers silently accept 0.
+          for (const key of ['_emscripten_glPixelStorei', 'emscripten_glPixelStorei']) {
+            if (typeof ns[key] !== 'function') continue;
+            const _orig = ns[key];
+            ns[key] = (pname, param) => {
+              if ((pname === GL_PACK_ALIGNMENT || pname === GL_UNPACK_ALIGNMENT) &&
+                  !VALID_ALIGN.has(param)) {
+                if (_pixelStoreFixCount++ < 5) {
+                  console.warn('[LibretroAdapter] GL fixup: glPixelStorei pname=0x' +
+                    pname.toString(16) + ' invalid alignment=' + param + ' → 4');
+                }
+                param = 4;
+              }
+              return _orig(pname, param);
+            };
+          }
+        }
+      };
+
       const _origInst        = WebAssembly.instantiate;
       const _origInstS       = WebAssembly.instantiateStreaming;
       const _restoreWA       = () => {
@@ -213,6 +294,7 @@ class LibretroAdapter {
         _captureMem(imports);
         _captureWasmBinary(source);
         _captureGLImports(imports);
+        _fixupGLImports(imports);
         return _origInst.call(WebAssembly, source, imports).then(result => {
           _captureTable(result?.instance?.exports);
           if (!_capturedModule) _capturedModule = result?.module;
@@ -222,6 +304,7 @@ class LibretroAdapter {
       WebAssembly.instantiateStreaming = (source, imports) => {
         _captureMem(imports);
         _captureGLImports(imports);
+        _fixupGLImports(imports);
         return _origInstS.call(WebAssembly, source, imports).then(result => {
           _captureTable(result?.instance?.exports);
           if (!_capturedModule) _capturedModule = result?.module;
@@ -1160,7 +1243,13 @@ class LibretroAdapter {
             M._free(ptr);
             return idx;
           };
-          const probes = ['glActiveTexture', 'glBindTexture', 'glDrawElements', 'glGetError'];
+          const probes = [
+            'glActiveTexture', 'glBindTexture', 'glDrawElements', 'glGetError',
+            'glGenVertexArrays', 'glBindVertexArray', 'glDeleteVertexArrays',
+            'glGenFramebuffers', 'glBindFramebuffer', 'glFramebufferTexture2D',
+            'glCreateShader', 'glCreateProgram', 'glUseProgram',
+            'glPixelStorei', 'glGenTextures', 'glTexImage2D',
+          ];
           for (const name of probes) {
             const idx = _probe(name);
             console.log('[LibretroAdapter] probe', name, '→', idx,
@@ -1771,8 +1860,27 @@ class LibretroAdapter {
 
       const table = M.wasmTable ?? M.__indirect_function_table;
       if (table) {
+        // Clear any pending GL errors before running context_reset so we can
+        // detect errors generated specifically by it.
+        if (this._glContext) {
+          while (this._glContext.getError() !== this._glContext.NO_ERROR) { /* drain */ }
+        }
         try { table.get(this._hwContextReset)(); }
         catch (e) { console.error('[LibretroAdapter] context_reset threw:', e); }
+        // Check GL error state left by context_reset.
+        if (this._glContext) {
+          const _glErrs = [];
+          let _e;
+          while ((_e = this._glContext.getError()) !== this._glContext.NO_ERROR) {
+            _glErrs.push('0x' + _e.toString(16));
+          }
+          if (_glErrs.length > 0) {
+            console.warn('[LibretroAdapter] context_reset left GL errors:', _glErrs.join(', '),
+              '— core GL state may be partially initialised');
+          } else {
+            console.log('[LibretroAdapter] context_reset completed with no GL errors ✓');
+          }
+        }
       }
 
       // ── Post-context_reset handle capture ───────────────────────────────────
