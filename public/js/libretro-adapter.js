@@ -1949,6 +1949,72 @@ class LibretroAdapter {
       // the next frame retry activation.  If it was 0, the lazy-discovery block
       // above will keep trying to acquire one.
     }
+
+    // ── Post-retro_run GL presentation (HW cores) ────────────────────────────
+    // Some libretro GL cores (e.g. GLideN64) render their final output into an
+    // internal FBO and leave it bound — they rely on the frontend to blit that
+    // FBO to the default framebuffer (the canvas).  If the core left a non-null
+    // FBO bound after retro_run, we perform a simple glBlitFramebuffer pass to
+    // copy the color attachment to the canvas.
+    //
+    // On the first frame we also read one centre pixel and log the GL error
+    // state; this lets us quickly distinguish "rendering but not composited"
+    // from "nothing rendered at all" when debugging blank-display issues.
+    if (this._hwRender && this._glContext) {
+      const gl = this._glContext;
+
+      // ── Diagnostic (first frame only) ──────────────────────────────────────
+      if (!this._glPresentDiag) {
+        this._glPresentDiag = true;
+        const err     = gl.getError();
+        const fbo     = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+        const readFbo = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING);
+        const px      = new Uint8Array(4);
+        try {
+          gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+          gl.readPixels(
+            Math.floor(this.canvas.width  / 2),
+            Math.floor(this.canvas.height / 2),
+            1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+        } catch (_) { /* ignore — context might not be ready yet */ }
+        console.log('[LibretroAdapter] post-retro_run frame-1 diag:', {
+          glError:          err,
+          boundDrawFBO:     fbo,
+          boundReadFBO:     readFbo,
+          centerPixelRGBA:  Array.from(px),
+          canvasSize:       this.canvas.width + '×' + this.canvas.height,
+          glctxObject:      !!this.canvas.GLctxObject,
+        });
+        // Restore read FBO to what it was before our readPixels diagnostic.
+        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, readFbo);
+      }
+
+      // ── FBO → canvas blit ─────────────────────────────────────────────────
+      // If the draw framebuffer is still bound to a non-default FBO after
+      // retro_run, the rendered image is sitting in that FBO's colour attachment
+      // rather than in the canvas's drawing buffer.  Blit it across now so the
+      // browser compositor can show it.
+      const drawFbo = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+      if (drawFbo !== null) {
+        try {
+          const w = this.canvas.width, h = this.canvas.height;
+          gl.bindFramebuffer(gl.READ_FRAMEBUFFER, drawFbo);
+          gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+          gl.blitFramebuffer(0, 0, w, h, 0, 0, w, h,
+            gl.COLOR_BUFFER_BIT, gl.NEAREST);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          if (!this._fboBlit) {
+            this._fboBlit = true;
+            console.log('[LibretroAdapter] FBO blit: core left non-null draw FBO bound; blitting to canvas.');
+          }
+        } catch (blitErr) {
+          if (!this._fboBlitErr) {
+            this._fboBlitErr = true;
+            console.warn('[LibretroAdapter] FBO blit failed:', blitErr);
+          }
+        }
+      }
+    }
   }
 
   /**
