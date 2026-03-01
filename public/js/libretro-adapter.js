@@ -1839,25 +1839,32 @@ class LibretroAdapter {
     // retro_run() so that every _emscripten_glXxx stub finds a valid GLctx.
     if (this._hwRender && this._glContext) {
 
-      // ── Lazy handle discovery ─────────────────────────────────────────────
-      // The core may have registered its GL context during context_reset
-      // (via emscripten_webgl_create_context → GL.registerContext, which sets
-      // canvas.GLctxObject) or lazily during the first retro_run frame.
-      // Re-check every frame until we have a handle.
-      if (!this._glHandle) {
-        // Path A: canvas.GLctxObject — set by GL.registerContext on the DOM element.
-        if (this.canvas.GLctxObject?.handle) {
-          this._glHandle = this.canvas.GLctxObject.handle;
-          if (!this._glContext) this._glContext = this.canvas.GLctxObject.GLctx;
-          console.log('[LibretroAdapter] step: lazy-acquired GL handle from canvas.GLctxObject:', this._glHandle);
+      // ── Handle discovery / refresh ────────────────────────────────────────
+      // canvas.GLctxObject is set (or updated) by GL.registerContext whenever
+      // the core registers a context — including re-registration during
+      // context_reset.  We must refresh _glHandle every frame from this source
+      // because a stale handle passed to makeContextCurrent causes Emscripten
+      // to set GL.currentContext = undefined, which clears the module-scoped
+      // GLctx variable used by every _emscripten_glXxx stub.
+      if (this.canvas.GLctxObject?.handle &&
+          this.canvas.GLctxObject.handle !== this._glHandle) {
+        if (this._glHandle) {
+          console.log('[LibretroAdapter] step: refreshed GL handle:',
+            this._glHandle, '→', this.canvas.GLctxObject.handle);
+        } else {
+          console.log('[LibretroAdapter] step: lazy-acquired GL handle from canvas.GLctxObject:',
+            this.canvas.GLctxObject.handle);
         }
-        // Path B: C-API get_current_context (exported by patch A).
-        if (!this._glHandle && typeof this.M._emscripten_webgl_get_current_context === 'function') {
-          const h = this.M._emscripten_webgl_get_current_context();
-          if (h > 0) {
-            this._glHandle = h;
-            console.log('[LibretroAdapter] step: lazy-acquired GL handle from get_current_context:', h);
-          }
+        this._glHandle = this.canvas.GLctxObject.handle;
+        if (!this._glContext) this._glContext = this.canvas.GLctxObject.GLctx;
+      }
+      // Path B: C-API get_current_context (exported by patch A) — only if we
+      // still have no handle after checking canvas.GLctxObject.
+      if (!this._glHandle && typeof this.M._emscripten_webgl_get_current_context === 'function') {
+        const h = this.M._emscripten_webgl_get_current_context();
+        if (h > 0) {
+          this._glHandle = h;
+          console.log('[LibretroAdapter] step: lazy-acquired GL handle from get_current_context:', h);
         }
       }
 
@@ -1878,6 +1885,12 @@ class LibretroAdapter {
       // Priority: __mkCC (patch B, calls real GL.makeContextCurrent in closure)
       //         → exported C-API (patch A)
       //         → M.GL.makeContextCurrent (if GL was exposed)
+      //
+      // After whichever path runs we ALWAYS verify that GL.currentContext was
+      // properly set.  If it was not (e.g. because the handle was stale and
+      // makeContextCurrent set GL.currentContext = undefined, clearing GLctx),
+      // we fall through to the synth fallback so the context is restored before
+      // retro_run() touches any GL entry point.
       if (this._glHandle) {
         if (typeof this.M.__mkCC === 'function') {
           this.M.__mkCC(this._glHandle);
@@ -1885,30 +1898,36 @@ class LibretroAdapter {
           this.M._emscripten_webgl_make_context_current(this._glHandle);
         } else {
           const gl = this.M.GL;
-          if (gl) {
-            if (typeof gl.makeContextCurrent === 'function') {
-              gl.makeContextCurrent(this._glHandle);
-            }
-            // Synth fallback: if makeContextCurrent found no entry, insert one.
-            if (!gl.currentContext?.version) {
-              const synth = gl.contexts?.[this._glHandle] ?? {
-                handle: this._glHandle,
-                attributes: { majorVersion: 2, minorVersion: 0 },
-                version: 2,
-                GLctx: this._glContext,
-                initExtensionsDone: true,
-              };
-              if (!synth.initExtensionsDone) synth.initExtensionsDone = true;
-              gl.contexts = gl.contexts ?? {};
-              gl.contexts[this._glHandle] = synth;
-              if (typeof gl.makeContextCurrent === 'function') {
-                gl.makeContextCurrent(this._glHandle);
-              }
-              if (!gl.currentContext?.version) {
-                gl.currentContext = synth;
-                if (this._glContext) this.M['ctx'] = this._glContext;
-              }
-            }
+          if (gl && typeof gl.makeContextCurrent === 'function') {
+            gl.makeContextCurrent(this._glHandle);
+          }
+        }
+
+        // Verify activation; synth-insert and retry if GL.currentContext is
+        // missing or has no version (happens when the handle is stale or when
+        // makeContextCurrent silently did a lookup miss).
+        const _mgl = this.M.GL;
+        if (_mgl && !_mgl.currentContext?.version) {
+          const synth = _mgl.contexts?.[this._glHandle] ?? {
+            handle: this._glHandle,
+            attributes: { majorVersion: 2, minorVersion: 0 },
+            version: 2,
+            GLctx: this._glContext,
+            initExtensionsDone: true,
+          };
+          if (!synth.initExtensionsDone) synth.initExtensionsDone = true;
+          _mgl.contexts = _mgl.contexts ?? {};
+          _mgl.contexts[this._glHandle] = synth;
+          if (typeof _mgl.makeContextCurrent === 'function') {
+            _mgl.makeContextCurrent(this._glHandle);
+          }
+          if (!_mgl.currentContext?.version &&
+              typeof this.M._emscripten_webgl_make_context_current === 'function') {
+            this.M._emscripten_webgl_make_context_current(this._glHandle);
+          }
+          if (!_mgl.currentContext?.version) {
+            _mgl.currentContext = synth;
+            if (this._glContext) this.M['ctx'] = this._glContext;
           }
         }
       } else if (this.M.GL && !this._glHandle) {
