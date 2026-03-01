@@ -102,10 +102,15 @@ class LibretroAdapter {
    *
    * @param {string} jsUrl         URL of the Emscripten JS glue / single-file bundle
    * @param {string} [wasmUrl]     URL of the separate .wasm file (two-file builds only)
+   * @param {HTMLCanvasElement} [canvas]  Canvas element to provide to Emscripten as Module.canvas.
+   *                               Cores compiled with automatic canvas-based GL initialization
+   *                               (e.g. -sFULL_ES3, -sUSE_WEBGL2) set GLctx from this canvas
+   *                               at startup.  Without it, every GL call in context_reset will
+   *                               fail with "cannot read 'version' of undefined".
    * @param {string} [globalName]  Window property name the module uses (default 'LibretroCore')
    * @returns {Promise<object>}    Resolved Emscripten Module, ready for use
    */
-  static loadCore(jsUrl, wasmUrl = null, globalName = 'LibretroCore') {
+  static loadCore(jsUrl, wasmUrl = null, canvas = null, globalName = 'LibretroCore') {
     return new Promise(async (resolve, reject) => {
       const timeout = setTimeout(
         () => reject(new Error('Libretro core initialization timed out (30 s)')),
@@ -210,6 +215,12 @@ class LibretroAdapter {
       // (or occasionally the build-configured name); we set both so either works.
       const modCfg = {
         noInitialRun: true,
+        // Provide the canvas up-front so Emscripten's GL layer can create and
+        // make-current a WebGL context during module initialization.  Cores
+        // compiled with automatic canvas-based GL init (-sFULL_ES3 / USE_WEBGL2)
+        // set the internal `GLctx` closure variable here; without it, every
+        // _emscripten_glXxx stub will crash with "cannot read 'version' of undefined".
+        ...(canvas ? { canvas } : {}),
         onRuntimeInitialized() {
           _restoreWA();
           clearTimeout(timeout);

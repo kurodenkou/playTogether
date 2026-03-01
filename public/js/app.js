@@ -470,6 +470,7 @@ async function startLibretroGame(playerOrder, seed, romUrl, coreUrl, coreWasmUrl
   const coreModule = await LibretroAdapter.loadCore(
     coreUrl,
     coreWasmUrl || null,
+    canvas,
   );
 
   el('loadingOverlay').textContent = 'Fetching ROM…';
