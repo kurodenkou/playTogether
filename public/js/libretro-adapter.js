@@ -136,23 +136,42 @@ class LibretroAdapter {
       // GL C-API functions captured from the WASM import object.
       // WASM import names are the original C symbol names and are never minified
       // by the JS optimizer, so these keys are reliable even in heavily minified builds.
+      // NOTE: Emscripten ≥ 3.1.41 drops the leading '_' from WASM import names
+      // (e.g. 'emscripten_webgl_make_context_current' instead of
+      // '_emscripten_webgl_make_context_current').  Both spellings are checked.
       let _capturedMakeCtxCurrent  = null;  // _emscripten_webgl_make_context_current
       let _capturedGetCtxCurrent   = null;  // _emscripten_webgl_get_current_context
+      let _capturedCreateCtx       = null;  // _emscripten_webgl_create_context
       const _captureGLImports = (imports) => {
-        if (_capturedMakeCtxCurrent && _capturedGetCtxCurrent) return;
+        if (_capturedMakeCtxCurrent && _capturedGetCtxCurrent && _capturedCreateCtx) return;
         // The namespace key is 'env' in most Emscripten builds; some minified
         // builds rename it (e.g. 'a').  Search all top-level namespace objects.
+        // Each function is checked with and without the leading '_' because
+        // Emscripten ≥ 3.1.41 drops the underscore from WASM import names.
         for (const ns of Object.values(imports || {})) {
           if (!ns || typeof ns !== 'object') continue;
-          if (!_capturedMakeCtxCurrent &&
-              typeof ns._emscripten_webgl_make_context_current === 'function') {
-            _capturedMakeCtxCurrent = ns._emscripten_webgl_make_context_current;
+          if (!_capturedMakeCtxCurrent) {
+            _capturedMakeCtxCurrent =
+              (typeof ns._emscripten_webgl_make_context_current  === 'function'
+                ? ns._emscripten_webgl_make_context_current  : null) ??
+              (typeof ns.emscripten_webgl_make_context_current   === 'function'
+                ? ns.emscripten_webgl_make_context_current   : null);
           }
-          if (!_capturedGetCtxCurrent &&
-              typeof ns._emscripten_webgl_get_current_context === 'function') {
-            _capturedGetCtxCurrent = ns._emscripten_webgl_get_current_context;
+          if (!_capturedGetCtxCurrent) {
+            _capturedGetCtxCurrent =
+              (typeof ns._emscripten_webgl_get_current_context   === 'function'
+                ? ns._emscripten_webgl_get_current_context   : null) ??
+              (typeof ns.emscripten_webgl_get_current_context    === 'function'
+                ? ns.emscripten_webgl_get_current_context    : null);
           }
-          if (_capturedMakeCtxCurrent && _capturedGetCtxCurrent) break;
+          if (!_capturedCreateCtx) {
+            _capturedCreateCtx =
+              (typeof ns._emscripten_webgl_create_context        === 'function'
+                ? ns._emscripten_webgl_create_context        : null) ??
+              (typeof ns.emscripten_webgl_create_context         === 'function'
+                ? ns.emscripten_webgl_create_context         : null);
+          }
+          if (_capturedMakeCtxCurrent && _capturedGetCtxCurrent && _capturedCreateCtx) break;
         }
       };
       const _origInst        = WebAssembly.instantiate;
@@ -287,9 +306,13 @@ class LibretroAdapter {
           if (_capturedGetCtxCurrent && !live._emscripten_webgl_get_current_context) {
             live._emscripten_webgl_get_current_context = _capturedGetCtxCurrent;
           }
+          if (_capturedCreateCtx && !live._emscripten_webgl_create_context) {
+            live._emscripten_webgl_create_context = _capturedCreateCtx;
+          }
           console.log('[LibretroAdapter] GL import capture:',
             'makeContextCurrent:', !!_capturedMakeCtxCurrent,
-            'getCurrentContext:', !!_capturedGetCtxCurrent);
+            'getCurrentContext:', !!_capturedGetCtxCurrent,
+            'createContext:', !!_capturedCreateCtx);
 
           // ── Debug: surface export availability for GL proc-address diagnosis ─
           {
@@ -1173,8 +1196,15 @@ class LibretroAdapter {
   _onVideoRefresh(dataPtr, width, height, pitch) {
     if (this._hwRender) {
       // Core rendered directly to the WebGL framebuffer (RETRO_HW_FRAME_BUFFER_VALID).
-      // Emscripten's GL→WebGL layer has already updated the canvas; nothing to blit.
-      if (width !== this._width || height !== this._height) this._resize(width, height);
+      // Track the reported dimensions but do NOT call _resize(): setting
+      // canvas.width/canvas.height clears the WebGL drawing buffer, destroying
+      // the frame the core just rendered to it.  The canvas was already sized
+      // correctly by _resize() in loadROM(); if the size needs to change mid-game
+      // that will be handled at the next step() boundary, not inside the callback.
+      if (width > 0 && height > 0) {
+        this._width  = width;
+        this._height = height;
+      }
       this._dirty = true;
       return;
     }
