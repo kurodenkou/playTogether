@@ -364,7 +364,12 @@ class LibretroAdapter {
         // where the GL assignment runs on the same code path.
         const GL_INJECT  =
           'if(!Module["GL"])Module["GL"]=GL;' +
-          'if(!Module["__mkCC"])Module["__mkCC"]=function(h){return GL.makeContextCurrent(h);};';
+          'if(!Module["__mkCC"])Module["__mkCC"]=function(h){return GL.makeContextCurrent(h);};' +
+          // __getGLctx / __setGLctx let the frontend read and directly write the
+          // closure-captured GLctx variable.  They are the fallback of last resort
+          // when all handle-based makeContextCurrent paths fail.
+          'if(!Module["__getGLctx"])Module["__getGLctx"]=function(){return GLctx;};' +
+          'if(!Module["__setGLctx"])Module["__setGLctx"]=function(c){GLctx=c;};';
         const GL_NEEDLES = [
           // Inside makeContextCurrent — reliable across minification levels
           'GL.currentContext=GL.contexts[',    // minified (most common for prod)
@@ -415,6 +420,28 @@ class LibretroAdapter {
         }
         if (!patchBApplied) {
           console.warn('[LibretroAdapter] GL patch B: no needle matched. Tried:', GL_NEEDLES);
+        }
+
+        // Patch C — inject __getGLctx / __setGLctx at the var/let GLctx
+        // declaration so they are available from module-init time, before any
+        // makeContextCurrent call (which is the Patch B injection trigger).
+        // This covers cores whose context_reset never calls makeContextCurrent,
+        // so the Patch B injections never run before the first retro_run.
+        const GLCTX_VAR_INJECT =
+          'Module["__getGLctx"]=function(){return GLctx;};' +
+          'Module["__setGLctx"]=function(c){GLctx=c;};';
+        const GLCTX_VAR_NEEDLES = ['var GLctx;', 'var GLctx,', 'let GLctx;', 'let GLctx,'];
+        let patchCApplied = false;
+        for (const needle of GLCTX_VAR_NEEDLES) {
+          if (patchedJsText.includes(needle)) {
+            patchedJsText = patchedJsText.replace(needle, needle + GLCTX_VAR_INJECT);
+            patchCApplied = true;
+            console.log('[LibretroAdapter] GL patch C applied (GLctx var, needle:', JSON.stringify(needle), ')');
+            break;
+          }
+        }
+        if (!patchCApplied) {
+          console.warn('[LibretroAdapter] GL patch C: var/let GLctx declaration not found in JS glue');
         }
 
         // Inject as a Blob URL; this lets the script execute without a separate
@@ -1952,6 +1979,22 @@ class LibretroAdapter {
             if (typeof gl.makeContextCurrent === 'function') gl.makeContextCurrent(h);
           }
         } catch (_) { /* best-effort */ }
+      }
+    }
+
+    // ── Nuclear GLctx fallback ────────────────────────────────────────────────
+    // If every handle-based activation path above failed to set the closure-
+    // captured GLctx variable (read by every _emscripten_glXxx stub), use
+    // __setGLctx to write it directly before retro_run() executes any GL calls.
+    // __setGLctx is injected by Patch B (inside makeContextCurrent) and Patch C
+    // (at the var GLctx declaration); it is the only path that works when M.GL
+    // is absent, no handle is known, and the C-API is not exported.
+    // We only override when GLctx is falsy to avoid disrupting cores that
+    // correctly manage their own context.
+    if (this._hwRender && this._glContext && typeof this.M.__setGLctx === 'function') {
+      const _cur = typeof this.M.__getGLctx === 'function' ? this.M.__getGLctx() : null;
+      if (!_cur) {
+        this.M.__setGLctx(this._glContext);
       }
     }
 
