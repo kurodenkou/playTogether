@@ -132,10 +132,12 @@ app.get('/rom-proxy', async (req, res) => {
     return res.status(400).send('Only HTTP and HTTPS URLs are supported');
   }
 
+  const contentType = parsed.pathname.endsWith('.wasm') ? 'application/wasm' : 'application/octet-stream';
+
   // Serve from cache when available
   const cached = romCacheGet(romUrl);
   if (cached) {
-    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Type', contentType);
     res.setHeader('Cache-Control', 'public, max-age=3600');
     res.setHeader('X-ROM-Cache', 'HIT');
     return res.send(cached);
@@ -163,7 +165,7 @@ app.get('/rom-proxy', async (req, res) => {
     const buf = Buffer.from(buffer);
     romCacheSet(romUrl, buf);
 
-    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Type', contentType);
     res.setHeader('Cache-Control', 'public, max-age=3600');
     res.setHeader('X-ROM-Cache', 'MISS');
     res.send(buf);

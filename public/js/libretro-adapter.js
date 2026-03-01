@@ -832,6 +832,17 @@ class LibretroAdapter {
           glBlendEquationSeparatei:'viii',   // void(GLuint buf, GLenum modeRGB, modeAlpha)
           glBlendFunci:            'viii',   // void(GLuint buf, GLenum src, GLenum dst)
           glBlendFuncSeparatei:    'viiiii', // void(GLuint buf, GLenum srcRGB, dstRGB, srcA, dstA)
+          // OpenGL 1D-texture functions — 1D textures do not exist in WebGL.
+          // GLideN64 (and other N64 renderers) call rglgen_resolve_symbols() which
+          // probes these; a ZERO table index causes a call_indirect trap.
+          glTexImage1D:             'viiiiiiii', // void(target,level,internalformat,width,border,format,type,data*) — 8 params
+          glTexSubImage1D:          'viiiiiii',  // void(target,level,xoffset,width,format,type,pixels*) — 7 params
+          glCopyTexImage1D:         'viiiiiii',  // void(target,level,internalformat,x,y,width,border) — 7 params
+          glCopyTexSubImage1D:      'viiiiii',   // void(target,level,xoffset,x,y,width) — 6 params
+          glCompressedTexImage1D:   'viiiiiii',  // void(target,level,internalformat,width,border,imageSize,data*) — 7 params
+          glCompressedTexSubImage1D:'viiiiiii',  // void(target,level,xoffset,width,format,imageSize,data*) — 7 params
+          glGetTexImage:            'viiiii',    // void(target,level,format,type,pixels*) — 5 params
+          glGetCompressedTexImage:  'viii',      // void(target,level,img*) — 3 params
         };
         // Cache: function name → registered table index (created on first zero hit).
         const _noopStubCache = Object.create(null);
