@@ -344,10 +344,12 @@ class LibretroAdapter {
     this._dirty       = false;
 
     // Hardware (GL) rendering state — populated by the SET_HW_RENDER handler.
-    this._hwRender       = false;  // true when the core uses OpenGL rendering
-    this._hwContextReset = 0;      // WASM table index of retro_hw_context_reset_t
-    this._glContext      = null;   // WebGL2 RenderingContext for GL cores
-    this._glHandle       = 0;      // Emscripten GL.contexts handle (for makeContextCurrent)
+    this._hwRender          = false;  // true when the core uses OpenGL rendering
+    this._hwContextReset    = 0;      // WASM table index of retro_hw_context_reset_t
+    this._hwContextDestroy  = 0;      // WASM table index of retro_hw_context_destroy_t (may be 0)
+    this._glContext         = null;   // WebGL2 RenderingContext for GL cores
+    this._glHandle          = 0;      // Emscripten GL.contexts handle (for makeContextCurrent)
+    this._glContextListeners = null;  // {lost, restored} AbortController for removeEventListener
 
     this._romLoaded   = false;
     this._audioMuted  = false;
@@ -722,8 +724,12 @@ class LibretroAdapter {
         //   get_proc_address        (fn ptr)    offset 12
         //   depth / stencil / bottom_left_origin (3×bool) offset 16–18
         //   version_major / version_minor       (2×u32)   offset 20–24
-        const ctxType  = M.HEAPU32[(data     ) >> 2];  // RETRO_HW_CONTEXT_* enum
-        const ctxReset = M.HEAPU32[(data +  4) >> 2];  // fn ptr: called when GL ready
+        const ctxType    = M.HEAPU32[(data     ) >> 2];  // RETRO_HW_CONTEXT_* enum
+        const ctxReset   = M.HEAPU32[(data +  4) >> 2];  // fn ptr: called when GL ready
+        // context_destroy sits at offset 32 in retro_hw_render_callback (after
+        // depth/stencil/bottom_left_origin bools at 16–18, version_major/minor
+        // u32s at 20/24, and cache_context bool + 3-byte pad at 28–31).
+        const ctxDestroy = M.HEAPU32[(data + 32) >> 2];  // fn ptr: called before GL loss
 
         // Vulkan (7) is not supported; everything else maps to WebGL2.
         if (ctxType === 7 /* RETRO_HW_CONTEXT_VULKAN */) return false;
@@ -995,8 +1001,9 @@ class LibretroAdapter {
           console.warn('[LibretroAdapter] proc address probe threw:', probeErr);
         }
 
-        this._hwRender       = true;
-        this._hwContextReset = ctxReset;
+        this._hwRender         = true;
+        this._hwContextReset   = ctxReset;
+        this._hwContextDestroy = ctxDestroy;
         this._hwFboFn        = fboFn;
         this._hwProcFn       = procFn;
         return true;
@@ -1389,24 +1396,33 @@ class LibretroAdapter {
 
     // For hardware-rendered cores, call the context_reset hook now that the
     // canvas has the correct dimensions and the GL context is active.
-    // The core uses this to compile shaders, upload geometry/textures, and
-    // bind the default framebuffer — the equivalent of "GL context is ready".
     if (this._hwRender && this._hwContextReset) {
-      // Ensure the GL context is registered with M.GL and is the active context
-      // before firing context_reset.  There are two scenarios where the handle
-      // stored during SET_HW_RENDER can be stale by the time we get here:
-      //
-      //  a) M.GL was absent at SET_HW_RENDER time (lazy Emscripten init) —
-      //     this._glHandle is still 0.
-      //  b) M.GL was fully re-initialised by retro_init (some cores trigger GL
-      //     lazy-init inside retro_init) — this._glHandle is non-zero but the
-      //     entry has been wiped from the fresh M.GL.contexts map.
-      //
-      // In both cases we need to (re-)register before calling makeContextCurrent,
-      // because makeContextCurrent(staleHandle) silently sets GL.currentContext =
-      // undefined (lookup miss), which then causes emscriptenWebGLGet to throw
-      // "Cannot read properties of undefined (reading 'version')".
-      // Trigger the JS-glue patch that leaks GL onto Module.
+      this._fireContextReset();
+      this._setupGLContextEvents();
+    }
+
+    this._romLoaded = true;
+  }
+
+  /**
+   * Activate the WebGL2 context in Emscripten's GL layer and invoke the
+   * core's context_reset callback.  Called once from loadROM() and again
+   * whenever the browser fires webglcontextrestored.
+   */
+  _fireContextReset() {
+    const M = this.M;
+
+    // Ensure the GL context is registered with M.GL and is the active context
+    // before firing context_reset.  There are two scenarios where the handle
+    // stored during SET_HW_RENDER can be stale by the time we get here:
+    //
+    //  a) M.GL was absent at SET_HW_RENDER time (lazy Emscripten init) —
+    //     this._glHandle is still 0.
+    //  b) M.GL was fully re-initialised by retro_init (some cores trigger GL
+    //     lazy-init inside retro_init) — this._glHandle is non-zero but the
+    //     entry has been wiped from the fresh M.GL.contexts map.
+    //
+    // Trigger the JS-glue patch that leaks GL onto Module.
       // The patch inserted `if(!Module["GL"])Module["GL"]=GL;` just before the
       // `Module.ctx = GLctx = …` line inside GL.makeContextCurrent.  Calling
       // _emscripten_webgl_make_context_current(0) — a no-op for context
@@ -1571,9 +1587,63 @@ class LibretroAdapter {
           console.log('[LibretroAdapter] captured GL handle after context_reset:', h);
         }
       }
-    }
+  }
 
-    this._romLoaded = true;
+  /**
+   * Attach webglcontextlost / webglcontextrestored listeners to the game
+   * canvas so that a GPU reset (driver crash, tab background throttle, etc.)
+   * is handled gracefully without a hard page reload.
+   *
+   * On loss  → prevent the default (which would permanently discard the context),
+   *            call the core's context_destroy callback if registered, and pause
+   *            frame generation.
+   * On restore → re-acquire the WebGL2 context, re-run the full GL-activation
+   *              sequence, and call context_reset so the core re-uploads its GPU
+   *              resources (shaders, textures, geometry buffers).
+   *
+   * A single AbortController is used so that a second loadROM() call (same
+   * adapter instance) safely removes the old listeners before adding new ones.
+   */
+  _setupGLContextEvents() {
+    // Remove any listeners from a previous loadROM() call.
+    this._glContextListeners?.abort();
+    const ac = new AbortController();
+    this._glContextListeners = ac;
+    const { signal } = ac;
+
+    this.canvas.addEventListener('webglcontextlost', (ev) => {
+      ev.preventDefault();   // allow the browser to restore the context later
+      console.warn('[LibretroAdapter] WebGL context lost — pausing emulation');
+
+      // Notify the core its GL resources are no longer valid.
+      if (this._hwContextDestroy) {
+        const table = this.M.wasmTable ?? this.M.__indirect_function_table;
+        if (table) {
+          try { table.get(this._hwContextDestroy)(); }
+          catch (e) { console.warn('[LibretroAdapter] context_destroy threw:', e); }
+        }
+      }
+
+      // Mark handle as invalid so step() does not try to re-activate a dead
+      // context while the browser is working on restoring it.
+      this._glHandle = 0;
+    }, { signal });
+
+    this.canvas.addEventListener('webglcontextrestored', () => {
+      console.log('[LibretroAdapter] WebGL context restored — reinitialising GL');
+
+      // The browser has issued a fresh WebGL2 context for the same canvas.
+      // Re-acquire it (getContext returns the new live context) and redo the
+      // full registration + context_reset sequence.
+      const newCtx = this.canvas.getContext('webgl2');
+      if (newCtx) {
+        this._glContext = newCtx;
+        this._glHandle  = 0;   // force re-registration with the new context
+        if (this.M.canvas) this.M.canvas = this.canvas; // keep Module.canvas current
+      }
+
+      this._fireContextReset();
+    }, { signal });
   }
 
   // ── Emulator contract ────────────────────────────────────────────────────────
