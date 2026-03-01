@@ -277,9 +277,30 @@ class LibretroAdapter {
         if (!resp.ok) throw new Error(`Core fetch failed: HTTP ${resp.status} — ${resp.statusText}`);
         const jsText = await resp.text();
 
+        // Patch the Emscripten glue to expose its internal GL object on Module.
+        //
+        // Many newer Emscripten builds keep `var GL = {…}` as a private closure
+        // variable and never assign Module.GL = GL.  Without Module.GL, the
+        // frontend cannot register a WebGL context or call makeContextCurrent,
+        // so GL.currentContext stays null and every _emscripten_glXxx stub
+        // crashes with "Cannot read properties of undefined (reading 'version')".
+        //
+        // The one place inside that closure that sets Module.ctx is
+        // GL.makeContextCurrent, which always runs the line:
+        //   Module.ctx = GLctx = GL.currentContext && GL.currentContext.GLctx
+        // We insert `if(!Module["GL"])Module["GL"]=GL;` immediately before that
+        // line so the first call to _emscripten_webgl_make_context_current (which
+        // we make deliberately in loadROM before context_reset) leaks GL onto
+        // Module, making all subsequent M.GL-based registration code work.
+        const GL_PATCH_NEEDLE   = 'Module.ctx = GLctx =';
+        const GL_PATCH_REPLACE  = 'if(!Module["GL"])Module["GL"]=GL; Module.ctx = GLctx =';
+        const patchedJsText = jsText.includes(GL_PATCH_NEEDLE)
+          ? jsText.replace(GL_PATCH_NEEDLE, GL_PATCH_REPLACE)
+          : jsText; // glue doesn't match — pass through unchanged
+
         // Inject as a Blob URL; this lets the script execute without a separate
         // network request (and without any CORS requirement from the origin host).
-        const blob    = new Blob([jsText], { type: 'application/javascript' });
+        const blob    = new Blob([patchedJsText], { type: 'application/javascript' });
         const blobUrl = URL.createObjectURL(blob);
         const script  = document.createElement('script');
         script.onerror = () => {
@@ -1385,6 +1406,17 @@ class LibretroAdapter {
       // because makeContextCurrent(staleHandle) silently sets GL.currentContext =
       // undefined (lookup miss), which then causes emscriptenWebGLGet to throw
       // "Cannot read properties of undefined (reading 'version')".
+      // Trigger the JS-glue patch that leaks GL onto Module.
+      // The patch inserted `if(!Module["GL"])Module["GL"]=GL;` just before the
+      // `Module.ctx = GLctx = …` line inside GL.makeContextCurrent.  Calling
+      // _emscripten_webgl_make_context_current(0) — a no-op for context
+      // activation (handle 0 = deactivate) — is enough to run that code and
+      // make M.GL point at the real internal GL object, so the registration
+      // blocks below can use it.
+      if (!M.GL && typeof M._emscripten_webgl_make_context_current === 'function') {
+        M._emscripten_webgl_make_context_current(0);
+      }
+
       if (M.GL && this._glContext) {
         // M.GL may have been lazily initialised by the core during retro_init
         // (triggered by the core calling emscripten_webgl_create_context(0, attrs)
