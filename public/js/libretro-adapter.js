@@ -1728,6 +1728,17 @@ class LibretroAdapter {
         }
       }
 
+      // Nuclear fallback: if all handle-based paths above failed to set GLctx,
+      // use __setGLctx (injected by Patches B/C) to write it directly before
+      // the core's context_reset executes any GL calls.
+      if (typeof M.__setGLctx === 'function' && this._glContext) {
+        const _cur = typeof M.__getGLctx === 'function' ? M.__getGLctx() : null;
+        if (!_cur) {
+          M.__setGLctx(this._glContext);
+          console.log('[LibretroAdapter] _fireContextReset: restored GLctx via __setGLctx');
+        }
+      }
+
       const table = M.wasmTable ?? M.__indirect_function_table;
       if (table) {
         try { table.get(this._hwContextReset)(); }
