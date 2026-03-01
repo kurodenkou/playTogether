@@ -277,38 +277,89 @@ class LibretroAdapter {
         if (!resp.ok) throw new Error(`Core fetch failed: HTTP ${resp.status} — ${resp.statusText}`);
         const jsText = await resp.text();
 
-        // Patch the Emscripten glue to expose its internal GL object on Module.
+        // ── JS-glue patches ───────────────────────────────────────────────────
         //
-        // Many newer Emscripten builds keep `var GL = {…}` as a private closure
-        // variable and never assign Module.GL = GL.  Without Module.GL, the
-        // frontend cannot register a WebGL context or call makeContextCurrent,
-        // so GL.currentContext stays null and every _emscripten_glXxx stub
-        // crashes with "Cannot read properties of undefined (reading 'version')".
+        // Problem: Many Emscripten builds keep `var GL = {…}` and
+        // `function _emscripten_webgl_make_context_current` as private closure
+        // variables and never expose them on Module.  Without them, the
+        // frontend cannot call GL.makeContextCurrent to set the closure-captured
+        // `GLctx` variable that every `_emscripten_glXxx` stub reads.
         //
-        // The one place inside that closure that sets Module.ctx is
-        // GL.makeContextCurrent.  We inject `if(!Module["GL"])Module["GL"]=GL;`
-        // immediately before that assignment so the first call to
-        // _emscripten_webgl_make_context_current (which we trigger deliberately
-        // in _fireContextReset before context_reset) leaks GL onto Module.
-        //
-        // Emscripten glue comes in several spacing / quoting variants:
-        //   Unminified : Module.ctx = GLctx = …
-        //   Minified   : Module.ctx=GLctx=…        (no spaces — most common for prod)
-        //   Bracket    : Module["ctx"]=GLctx=…     (some build configs)
-        // Try each in order; stop at the first hit.
-        const GL_INJECT  = 'if(!Module["GL"])Module["GL"]=GL;';
+        // Patch A — expose _emscripten_webgl_make_context_current on Module
+        // ──────────────────────────────────────────────────────────────────
+        // JavaScript function *declarations* (`function foo() {}`) are hoisted
+        // to the top of their enclosing scope at parse time, so an assignment
+        // `Module["foo"] = foo;` placed *before* the declaration in the source
+        // text still executes after `foo` is fully defined.  We exploit this to
+        // unconditionally export the C-API function before its declaration.
+        // This function calls GL.makeContextCurrent internally, which updates the
+        // closure-captured GLctx variable read by every _emscripten_glXxx stub.
+        const MAKE_CURRENT_FN   = '_emscripten_webgl_make_context_current';
+        const MAKE_CURRENT_DECL = `function ${MAKE_CURRENT_FN}(`;
+        const MAKE_CURRENT_INJECT =
+          `Module[${JSON.stringify(MAKE_CURRENT_FN)}]=${MAKE_CURRENT_FN};`;
+
+        // Patch B — expose the internal GL object and a stable makeContextCurrent
+        //           wrapper on Module via GL.makeContextCurrent's body
+        // ──────────────────────────────────────────────────────────────────────
+        // GL.makeContextCurrent contains `GL.currentContext = GL.contexts[…]`.
+        // Injecting there captures GL in a closure for __mkCC (our stable
+        // wrapper) and assigns it to Module.GL so our registration helpers work.
+        // This also covers `Module.ctx = GLctx = …` (older Emscripten builds)
+        // where the GL assignment runs on the same code path.
+        const GL_INJECT  =
+          'if(!Module["GL"])Module["GL"]=GL;' +
+          'if(!Module["__mkCC"])Module["__mkCC"]=function(h){return GL.makeContextCurrent(h);};';
         const GL_NEEDLES = [
-          'Module.ctx = GLctx =',    // unminified
-          'Module.ctx=GLctx=',       // minified (spaces stripped)
-          'Module["ctx"] = GLctx =', // bracket-notation unminified
-          'Module["ctx"]=GLctx=',    // bracket-notation minified
+          // Inside makeContextCurrent — reliable across minification levels
+          'GL.currentContext=GL.contexts[',    // minified (most common for prod)
+          'GL.currentContext = GL.contexts[',  // unminified
+          // Fallback: the Module.ctx assignment in the same function
+          'Module.ctx=GLctx=',
+          'Module.ctx = GLctx =',
+          'Module["ctx"]=GLctx=',
+          'Module["ctx"] = GLctx =',
         ];
+
         let patchedJsText = jsText;
+
+        // Apply Patch A (function-hoisting exports of C-API functions)
+        // Also export _emscripten_webgl_get_current_context for handle capture.
+        const GET_CURRENT_FN   = '_emscripten_webgl_get_current_context';
+        const GET_CURRENT_DECL = `function ${GET_CURRENT_FN}(`;
+        const FULL_INJECT_A =
+          `Module[${JSON.stringify(MAKE_CURRENT_FN)}]=${MAKE_CURRENT_FN};` +
+          `if(typeof ${GET_CURRENT_FN}==="function")` +
+            `Module[${JSON.stringify(GET_CURRENT_FN)}]=${GET_CURRENT_FN};`;
+
+        if (patchedJsText.includes(MAKE_CURRENT_DECL)) {
+          patchedJsText = patchedJsText.replace(MAKE_CURRENT_DECL,
+            FULL_INJECT_A + MAKE_CURRENT_DECL);
+          console.log('[LibretroAdapter] GL patch A applied (exported', MAKE_CURRENT_FN, ')');
+        } else {
+          console.warn('[LibretroAdapter] GL patch A: function declaration not found in JS glue');
+        }
+
+        // Also expose get_current_context if its declaration appears separately
+        if (!patchedJsText.includes(MAKE_CURRENT_DECL) &&
+            patchedJsText.includes(GET_CURRENT_DECL) &&
+            !patchedJsText.includes(`Module[${JSON.stringify(GET_CURRENT_FN)}]`)) {
+          patchedJsText = patchedJsText.replace(GET_CURRENT_DECL,
+            `Module[${JSON.stringify(GET_CURRENT_FN)}]=${GET_CURRENT_FN};` + GET_CURRENT_DECL);
+        }
+
+        // Apply Patch B (expose GL object + __mkCC wrapper)
+        let patchBApplied = false;
         for (const needle of GL_NEEDLES) {
-          if (jsText.includes(needle)) {
-            patchedJsText = jsText.replace(needle, GL_INJECT + needle);
+          if (patchedJsText.includes(needle)) {
+            patchedJsText = patchedJsText.replace(needle, GL_INJECT + needle);
+            patchBApplied = true;
+            console.log('[LibretroAdapter] GL patch B applied (needle:', JSON.stringify(needle), ')');
             break;
           }
+        }
+        if (!patchBApplied) {
+          console.warn('[LibretroAdapter] GL patch B: no needle matched. Tried:', GL_NEEDLES);
         }
 
         // Inject as a Blob URL; this lets the script execute without a separate
@@ -1446,21 +1497,6 @@ class LibretroAdapter {
         M._emscripten_webgl_make_context_current(0);
       }
 
-      // canvas.GLctxObject is set by GL.registerContext in some Emscripten builds
-      // (the property is attached to the canvas element by registerContext so that
-      // the context can be found without going through Module.GL).  When M.GL was
-      // never exposed but the core registered its own context, this gives us the
-      // handle without needing M.GL at all.
-      if (!this._glHandle && this.canvas.GLctxObject) {
-        const ctxObj = this.canvas.GLctxObject;
-        if (ctxObj.GLctx === this._glContext || !this._glContext) {
-          this._glHandle = ctxObj.handle || 0;
-          if (!this._glContext) this._glContext = ctxObj.GLctx;
-          if (this._glHandle)
-            console.log('[LibretroAdapter] found GL handle via canvas.GLctxObject:', this._glHandle);
-        }
-      }
-
       if (M.GL && this._glContext) {
         // M.GL may have been lazily initialised by the core during retro_init
         // (triggered by the core calling emscripten_webgl_create_context(0, attrs)
@@ -1599,22 +1635,59 @@ class LibretroAdapter {
         }
       }
 
+      // Best-effort context activation immediately before context_reset.
+      // Use __mkCC first (injected by Patch B into makeContextCurrent itself),
+      // then the exported C-API (Patch A), then the M.GL path already done above.
+      if (this._glHandle) {
+        if (typeof M.__mkCC === 'function') {
+          M.__mkCC(this._glHandle);
+        } else if (typeof M._emscripten_webgl_make_context_current === 'function') {
+          M._emscripten_webgl_make_context_current(this._glHandle);
+        }
+      }
+
       const table = M.wasmTable ?? M.__indirect_function_table;
       if (table) {
         try { table.get(this._hwContextReset)(); }
         catch (e) { console.error('[LibretroAdapter] context_reset threw:', e); }
       }
-      // After context_reset, the core may have activated its own GL context handle
-      // (via emscripten_webgl_make_context_current internally).  Capture whatever
-      // handle is now active so step() can re-activate it before each retro_run().
-      // This works even when Module.GL is not exposed (newer Emscripten builds).
-      if (typeof M._emscripten_webgl_get_current_context === 'function') {
+
+      // ── Post-context_reset handle capture ───────────────────────────────────
+      // The core calls emscripten_webgl_create_context + make_context_current
+      // during context_reset, which makes GL.registerContext set canvas.GLctxObject
+      // and makes get_current_context return a valid handle.  Check AFTER the call.
+
+      // Path 1: canvas.GLctxObject (set by GL.registerContext — works even
+      //          when Module.GL is not exposed, since it's on the DOM element).
+      if (!this._glHandle && this.canvas.GLctxObject) {
+        const ctxObj = this.canvas.GLctxObject;
+        this._glHandle = ctxObj.handle || 0;
+        if (!this._glContext) this._glContext = ctxObj.GLctx;
+        if (this._glHandle)
+          console.log('[LibretroAdapter] captured GL handle from canvas.GLctxObject post-context_reset:', this._glHandle);
+      }
+
+      // Path 2: C-API exported by Patch A.
+      if (!this._glHandle && typeof M._emscripten_webgl_get_current_context === 'function') {
         const h = M._emscripten_webgl_get_current_context();
         if (h > 0) {
           this._glHandle = h;
-          console.log('[LibretroAdapter] captured GL handle after context_reset:', h);
+          console.log('[LibretroAdapter] captured GL handle via get_current_context post-context_reset:', h);
         }
       }
+
+      // Path 3: canvas.GLctxObject handle updated even if we had one already
+      // (the core might have registered a fresh handle on context_reset).
+      if (this._glHandle && this.canvas.GLctxObject?.handle &&
+          this.canvas.GLctxObject.handle !== this._glHandle) {
+        console.log('[LibretroAdapter] updating GL handle from canvas.GLctxObject:',
+          this._glHandle, '→', this.canvas.GLctxObject.handle);
+        this._glHandle = this.canvas.GLctxObject.handle;
+      }
+
+      console.log('[LibretroAdapter] context_reset complete. glHandle:', this._glHandle,
+        'hasMGL:', !!M.GL, 'hasMkCC:', typeof M.__mkCC === 'function',
+        'hasCApiMCC:', typeof M._emscripten_webgl_make_context_current === 'function');
   }
 
   /**
@@ -1707,87 +1780,119 @@ class LibretroAdapter {
 
     if (this._audioCtx?.state === 'suspended') this._audioCtx.resume();
 
-    // For hardware-rendered cores, ensure Emscripten's GL module sees the right
-    // context before retro_run() issues any _emscripten_glXxx calls.
-    // GL.currentContext / GLctx can be cleared by browser task-scheduler boundaries
-    // or by the core calling emscripten_webgl_make_context_current(0) internally.
-    // Guard on _glContext (not _glHandle) so we can lazily acquire the handle if
-    // M.GL was absent at SET_HW_RENDER time but has been lazy-initialised since.
+    // For hardware-rendered cores, make the Emscripten GL context current before
+    // retro_run() so that every _emscripten_glXxx stub finds a valid GLctx.
     if (this._hwRender && this._glContext) {
-      // Re-activate via the exported C API first.  This is the most reliable
-      // approach: the function lives inside the module's own closure so it
-      // always updates the closure-captured GLctx variable, and works even
-      // when Module.GL is not exposed (some newer Emscripten builds omit it).
-      if (this._glHandle &&
-          typeof this.M._emscripten_webgl_make_context_current === 'function') {
-        this.M._emscripten_webgl_make_context_current(this._glHandle);
-      }
-      const gl = this.M.GL;
-      // If the handle is still unset (M.GL was absent at SET_HW_RENDER but has
-      // since been lazy-initialised by the core), register the context now.
-      if (!this._glHandle && gl) {
-        try {
-          if (typeof gl.registerContext === 'function') {
-            const h = gl.registerContext(this._glContext, { majorVersion: 2, minorVersion: 0 }) || 0;
-            if (h) this._glHandle = h;
+
+      // ── Lazy handle discovery ─────────────────────────────────────────────
+      // The core may have registered its GL context during context_reset
+      // (via emscripten_webgl_create_context → GL.registerContext, which sets
+      // canvas.GLctxObject) or lazily during the first retro_run frame.
+      // Re-check every frame until we have a handle.
+      if (!this._glHandle) {
+        // Path A: canvas.GLctxObject — set by GL.registerContext on the DOM element.
+        if (this.canvas.GLctxObject?.handle) {
+          this._glHandle = this.canvas.GLctxObject.handle;
+          if (!this._glContext) this._glContext = this.canvas.GLctxObject.GLctx;
+          console.log('[LibretroAdapter] step: lazy-acquired GL handle from canvas.GLctxObject:', this._glHandle);
+        }
+        // Path B: C-API get_current_context (exported by patch A).
+        if (!this._glHandle && typeof this.M._emscripten_webgl_get_current_context === 'function') {
+          const h = this.M._emscripten_webgl_get_current_context();
+          if (h > 0) {
+            this._glHandle = h;
+            console.log('[LibretroAdapter] step: lazy-acquired GL handle from get_current_context:', h);
           }
-          if (!this._glHandle) {
-            const h = typeof gl.getNewId === 'function'
-              ? gl.getNewId(gl.contexts ?? {}) : 1;
+        }
+      }
+
+      // ── Diagnostic (first frame only) ────────────────────────────────────
+      if (!this._glDiagLogged) {
+        this._glDiagLogged = true;
+        console.log('[LibretroAdapter] step first-frame GL state:', {
+          _glHandle: this._glHandle,
+          hasMGL:    !!this.M.GL,
+          hasMkCC:   typeof this.M.__mkCC === 'function',
+          hasCApiMCC: typeof this.M._emscripten_webgl_make_context_current === 'function',
+          hasCApiGCC: typeof this.M._emscripten_webgl_get_current_context === 'function',
+          canvasGLctxHandle: this.canvas.GLctxObject?.handle ?? null,
+        });
+      }
+
+      // ── Context activation ────────────────────────────────────────────────
+      // Priority: __mkCC (patch B, calls real GL.makeContextCurrent in closure)
+      //         → exported C-API (patch A)
+      //         → M.GL.makeContextCurrent (if GL was exposed)
+      if (this._glHandle) {
+        if (typeof this.M.__mkCC === 'function') {
+          this.M.__mkCC(this._glHandle);
+        } else if (typeof this.M._emscripten_webgl_make_context_current === 'function') {
+          this.M._emscripten_webgl_make_context_current(this._glHandle);
+        } else {
+          const gl = this.M.GL;
+          if (gl) {
+            if (typeof gl.makeContextCurrent === 'function') {
+              gl.makeContextCurrent(this._glHandle);
+            }
+            // Synth fallback: if makeContextCurrent found no entry, insert one.
+            if (!gl.currentContext?.version) {
+              const synth = gl.contexts?.[this._glHandle] ?? {
+                handle: this._glHandle,
+                attributes: { majorVersion: 2, minorVersion: 0 },
+                version: 2,
+                GLctx: this._glContext,
+                initExtensionsDone: true,
+              };
+              if (!synth.initExtensionsDone) synth.initExtensionsDone = true;
+              gl.contexts = gl.contexts ?? {};
+              gl.contexts[this._glHandle] = synth;
+              if (typeof gl.makeContextCurrent === 'function') {
+                gl.makeContextCurrent(this._glHandle);
+              }
+              if (!gl.currentContext?.version) {
+                gl.currentContext = synth;
+                if (this._glContext) this.M['ctx'] = this._glContext;
+              }
+            }
+          }
+        }
+      } else if (this.M.GL && !this._glHandle) {
+        // No handle yet — try to register our own context so the core can at
+        // least render its first frame while context_reset completes.
+        const gl = this.M.GL;
+        try {
+          let h = 0;
+          if (typeof gl.registerContext === 'function') {
+            h = gl.registerContext(this._glContext, { majorVersion: 2, minorVersion: 0 }) || 0;
+          }
+          if (!h) {
+            h = typeof gl.getNewId === 'function' ? gl.getNewId(gl.contexts ?? {}) : 1;
             gl.contexts = gl.contexts ?? {};
             gl.contexts[h] = {
               handle: h, attributes: { majorVersion: 2, minorVersion: 0 },
               version: 2, GLctx: this._glContext, initExtensionsDone: true,
             };
+          }
+          if (h) {
             this._glHandle = h;
+            if (typeof gl.makeContextCurrent === 'function') gl.makeContextCurrent(h);
           }
-        } catch (_lazyErr) { /* best-effort */ }
-      }
-      if (gl && this._glHandle) {
-        if (typeof gl.makeContextCurrent === 'function') {
-          gl.makeContextCurrent(this._glHandle);
-        }
-        // makeContextCurrent may have silently failed (lookup miss sets
-        // GL.currentContext = undefined and GLctx = undefined), causing
-        // _emscripten_glXxx stubs to throw on the next retro_run() frame.
-        // Re-insert a synthetic entry and retry so both GL.currentContext
-        // and the closure-captured GLctx are restored.
-        if (!gl.currentContext?.version) {
-          const synth = gl.contexts?.[this._glHandle] ?? {
-            handle: this._glHandle,
-            attributes: { majorVersion: 2, minorVersion: 0 },
-            version: 2,
-            GLctx: this._glContext,
-            initExtensionsDone: true,
-          };
-          if (!synth.initExtensionsDone) synth.initExtensionsDone = true;
-          gl.contexts = gl.contexts ?? {};
-          gl.contexts[this._glHandle] = synth;
-          if (typeof gl.makeContextCurrent === 'function') {
-            gl.makeContextCurrent(this._glHandle);
-          }
-          // Also try the exported C-API which updates the closure-captured GLctx.
-          if (!gl.currentContext?.version &&
-              typeof this.M._emscripten_webgl_make_context_current === 'function') {
-            this.M._emscripten_webgl_make_context_current(this._glHandle);
-          }
-          if (!gl.currentContext?.version) {
-            gl.currentContext = synth;
-            if (this._glContext) this.M['ctx'] = this._glContext;
-          }
-        }
+        } catch (_) { /* best-effort */ }
       }
     }
 
     try {
       this.M._retro_run();
     } catch (runErr) {
-      console.error('[LibretroAdapter] retro_run threw:', runErr);
-      // Reset the GL handle so the next frame re-attempts context activation.
-      // This prevents the loop from silently rendering nothing while the handle
-      // is stale; the next step() call will go through the lazy-registration
-      // path again and may succeed once the core finishes its internal GL init.
-      if (this._hwRender) this._glHandle = 0;
+      // Log only once per error message to avoid console spam across 60 fps.
+      const msg = runErr?.message ?? String(runErr);
+      if (this._lastRetroRunErr !== msg) {
+        this._lastRetroRunErr = msg;
+        console.error('[LibretroAdapter] retro_run threw:', runErr);
+      }
+      // Do NOT reset _glHandle here — if the handle was valid, keeping it lets
+      // the next frame retry activation.  If it was 0, the lazy-discovery block
+      // above will keep trying to acquire one.
     }
   }
 
