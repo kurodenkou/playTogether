@@ -128,6 +128,28 @@ class LibretroAdapter {
       let _capturedExports   = null;   // raw WASM instance exports (superset of Module._xxx)
       let _capturedWasm      = null;   // WASM binary ArrayBuffer (captured from fallback path)
       let _capturedModule    = null;   // WebAssembly.Module object (for custom-section inspection)
+      // GL C-API functions captured from the WASM import object.
+      // WASM import names are the original C symbol names and are never minified
+      // by the JS optimizer, so these keys are reliable even in heavily minified builds.
+      let _capturedMakeCtxCurrent  = null;  // _emscripten_webgl_make_context_current
+      let _capturedGetCtxCurrent   = null;  // _emscripten_webgl_get_current_context
+      const _captureGLImports = (imports) => {
+        if (_capturedMakeCtxCurrent && _capturedGetCtxCurrent) return;
+        // The namespace key is 'env' in most Emscripten builds; some minified
+        // builds rename it (e.g. 'a').  Search all top-level namespace objects.
+        for (const ns of Object.values(imports || {})) {
+          if (!ns || typeof ns !== 'object') continue;
+          if (!_capturedMakeCtxCurrent &&
+              typeof ns._emscripten_webgl_make_context_current === 'function') {
+            _capturedMakeCtxCurrent = ns._emscripten_webgl_make_context_current;
+          }
+          if (!_capturedGetCtxCurrent &&
+              typeof ns._emscripten_webgl_get_current_context === 'function') {
+            _capturedGetCtxCurrent = ns._emscripten_webgl_get_current_context;
+          }
+          if (_capturedMakeCtxCurrent && _capturedGetCtxCurrent) break;
+        }
+      };
       const _origInst        = WebAssembly.instantiate;
       const _origInstS       = WebAssembly.instantiateStreaming;
       const _restoreWA       = () => {
@@ -166,6 +188,7 @@ class LibretroAdapter {
       WebAssembly.instantiate = (source, imports) => {
         _captureMem(imports);
         _captureWasmBinary(source);
+        _captureGLImports(imports);
         return _origInst.call(WebAssembly, source, imports).then(result => {
           _captureTable(result?.instance?.exports);
           if (!_capturedModule) _capturedModule = result?.module;
@@ -174,6 +197,7 @@ class LibretroAdapter {
       };
       WebAssembly.instantiateStreaming = (source, imports) => {
         _captureMem(imports);
+        _captureGLImports(imports);
         return _origInstS.call(WebAssembly, source, imports).then(result => {
           _captureTable(result?.instance?.exports);
           if (!_capturedModule) _capturedModule = result?.module;
@@ -235,6 +259,26 @@ class LibretroAdapter {
           if (_capturedModule && !live._wasmModule) {
             live._wasmModule = _capturedModule;
           }
+
+          // ── Expose captured GL C-API functions ───────────────────────────────
+          // These were captured from the WASM import object in the instantiate
+          // hook above.  WASM import keys are always the original C symbol names
+          // (never minified), so this is reliable across any Emscripten version.
+          // Exposing them on Module lets _fireContextReset / step() call them
+          // even when the Emscripten JS glue doesn't add Module._xxx wrappers.
+          if (_capturedMakeCtxCurrent) {
+            if (!live._emscripten_webgl_make_context_current)
+              live._emscripten_webgl_make_context_current = _capturedMakeCtxCurrent;
+            // Also expose __mkCC for the __mkCC-path in step()
+            if (!live.__mkCC)
+              live.__mkCC = _capturedMakeCtxCurrent;
+          }
+          if (_capturedGetCtxCurrent && !live._emscripten_webgl_get_current_context) {
+            live._emscripten_webgl_get_current_context = _capturedGetCtxCurrent;
+          }
+          console.log('[LibretroAdapter] GL import capture:',
+            'makeContextCurrent:', !!_capturedMakeCtxCurrent,
+            'getCurrentContext:', !!_capturedGetCtxCurrent);
 
           // ── Debug: surface export availability for GL proc-address diagnosis ─
           {
