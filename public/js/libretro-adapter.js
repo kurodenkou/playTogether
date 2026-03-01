@@ -286,17 +286,30 @@ class LibretroAdapter {
         // crashes with "Cannot read properties of undefined (reading 'version')".
         //
         // The one place inside that closure that sets Module.ctx is
-        // GL.makeContextCurrent, which always runs the line:
-        //   Module.ctx = GLctx = GL.currentContext && GL.currentContext.GLctx
-        // We insert `if(!Module["GL"])Module["GL"]=GL;` immediately before that
-        // line so the first call to _emscripten_webgl_make_context_current (which
-        // we make deliberately in loadROM before context_reset) leaks GL onto
-        // Module, making all subsequent M.GL-based registration code work.
-        const GL_PATCH_NEEDLE   = 'Module.ctx = GLctx =';
-        const GL_PATCH_REPLACE  = 'if(!Module["GL"])Module["GL"]=GL; Module.ctx = GLctx =';
-        const patchedJsText = jsText.includes(GL_PATCH_NEEDLE)
-          ? jsText.replace(GL_PATCH_NEEDLE, GL_PATCH_REPLACE)
-          : jsText; // glue doesn't match — pass through unchanged
+        // GL.makeContextCurrent.  We inject `if(!Module["GL"])Module["GL"]=GL;`
+        // immediately before that assignment so the first call to
+        // _emscripten_webgl_make_context_current (which we trigger deliberately
+        // in _fireContextReset before context_reset) leaks GL onto Module.
+        //
+        // Emscripten glue comes in several spacing / quoting variants:
+        //   Unminified : Module.ctx = GLctx = …
+        //   Minified   : Module.ctx=GLctx=…        (no spaces — most common for prod)
+        //   Bracket    : Module["ctx"]=GLctx=…     (some build configs)
+        // Try each in order; stop at the first hit.
+        const GL_INJECT  = 'if(!Module["GL"])Module["GL"]=GL;';
+        const GL_NEEDLES = [
+          'Module.ctx = GLctx =',    // unminified
+          'Module.ctx=GLctx=',       // minified (spaces stripped)
+          'Module["ctx"] = GLctx =', // bracket-notation unminified
+          'Module["ctx"]=GLctx=',    // bracket-notation minified
+        ];
+        let patchedJsText = jsText;
+        for (const needle of GL_NEEDLES) {
+          if (jsText.includes(needle)) {
+            patchedJsText = jsText.replace(needle, GL_INJECT + needle);
+            break;
+          }
+        }
 
         // Inject as a Blob URL; this lets the script execute without a separate
         // network request (and without any CORS requirement from the origin host).
