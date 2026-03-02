@@ -138,9 +138,19 @@ class RollbackEngine {
     this._lastTime = timestamp;
     this._accumulator += delta;
 
+    const loopStart = performance.now();
     while (this._accumulator >= this.FRAME_MS) {
       this._tick();
       this._accumulator -= this.FRAME_MS;
+      // If one tick consumed more wall-clock time than a single frame budget,
+      // bail out and discard leftover simulated time.  Without this, a slow
+      // core (e.g. N64 without dynarec) triggers 6 back-to-back heavy ticks
+      // per RAF callback, blocking the main thread for seconds at a time and
+      // making Chrome kill the tab as unresponsive.
+      if (performance.now() - loopStart > this.FRAME_MS) {
+        this._accumulator = 0;
+        break;
+      }
     }
 
     this.emulator.render();
@@ -164,7 +174,11 @@ class RollbackEngine {
     }
 
     // ③ Snapshot state BEFORE simulating this frame
-    this.stateHistory.set(this.frame, this.emulator.saveState());
+    // Only store non-null snapshots: a null return (e.g. when the core's state
+    // exceeds the size limit) must not be recorded, otherwise stateHistory.has()
+    // would return true and _performRollback would try to restore a null state.
+    const snap = this.emulator.saveState();
+    if (snap !== null) this.stateHistory.set(this.frame, snap);
 
     // ④ Gather inputs (confirmed or predicted) and simulate
     const inputs = this._gatherInputs(this.frame);

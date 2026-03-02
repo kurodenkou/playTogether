@@ -60,6 +60,13 @@
  *   all map directly to their RETRO_DEVICE_ID_JOYPAD_* counterparts.
  */
 class LibretroAdapter {
+  // Maximum serialized state size (bytes) allowed for rollback snapshots.
+  // N64 cores (mupen64plus-next) report 15–40 MB; saving that every frame
+  // causes GC pressure that pegs the CPU and eventually OOMs Chrome.
+  // Returning null from saveState() for oversized states disables rollback
+  // for that core without affecting gameplay.
+  static MAX_SAVESTATE_BYTES = 16 * 1024 * 1024; // 16 MB
+
   // RETRO_DEVICE_ID_JOYPAD_* constants
   static JOYPAD = Object.freeze({
     B: 0, Y: 1, SELECT: 2, START: 3,
@@ -2237,6 +2244,22 @@ class LibretroAdapter {
     const M    = this.M;
     const size = M._retro_serialize_size();
     if (!size) return null;
+    // Skip serialization for cores whose state exceeds the rollback size limit
+    // (e.g. N64 / mupen64plus-next: 15–40 MB).  Allocating and GC-ing that
+    // every frame at 60 fps causes a sustained CPU spike and eventually an OOM
+    // crash in Chrome.  Returning null here disables rollback for this core
+    // without affecting normal gameplay.
+    if (size > LibretroAdapter.MAX_SAVESTATE_BYTES) {
+      if (!this._warnedStateTooLarge) {
+        this._warnedStateTooLarge = true;
+        console.warn(
+          `[LibretroAdapter] saveState() skipped: serialize size ${size} B ` +
+          `exceeds ${LibretroAdapter.MAX_SAVESTATE_BYTES} B limit — ` +
+          'rollback snapshots disabled for this core.'
+        );
+      }
+      return null;
+    }
     const ptr = M._malloc(size);
     if (!ptr) return null;
     const ok = M._retro_serialize(ptr, size);
