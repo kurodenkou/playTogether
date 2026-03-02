@@ -65,7 +65,11 @@ class LibretroAdapter {
   // causes GC pressure that pegs the CPU and eventually OOMs Chrome.
   // Returning null from saveState() for oversized states disables rollback
   // for that core without affecting gameplay.
-  static MAX_SAVESTATE_BYTES = 16 * 1024 * 1024; // 16 MB
+  // N64's RDRAM alone is 4 MB, so any mupen64plus-next state is ≥ 4 MB.
+  // Keeping the threshold just under that leaves rollback enabled for every
+  // other common core (NES ≈50 KB, SNES ≈200 KB, GBA ≈300 KB, PS1 ≈2 MB)
+  // while skipping the expensive serialize/copy for N64.
+  static MAX_SAVESTATE_BYTES = 4 * 1024 * 1024; // 4 MB
 
   // RETRO_DEVICE_ID_JOYPAD_* constants
   static JOYPAD = Object.freeze({

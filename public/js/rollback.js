@@ -234,7 +234,8 @@ class RollbackEngine {
     // emulators that don't implement setAudioMuted (e.g. DemoGame/Pong).
     this.emulator.setAudioMuted?.(true);
     for (let f = toFrame; f < this.frame; f++) {
-      this.stateHistory.set(f, this.emulator.saveState());
+      const snap = this.emulator.saveState();
+      if (snap !== null) this.stateHistory.set(f, snap);
       const inputs = this._gatherInputs(f);
       this.usedInputs.set(f, inputs);
       this.emulator.step(inputs);
