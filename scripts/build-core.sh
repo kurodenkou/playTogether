@@ -107,11 +107,6 @@ CORE_NAME[fbalpha2012_cps1]="FB Alpha 2012 CPS-1 (Arcade)"
 CORE_SYSTEM[fbalpha2012_cps1]="arcade"
 CORE_BUILD[fbalpha2012_cps1]="make"
 
-CORE_REPO[n64wasm]="https://github.com/libretro/mupen64plus-libretro-nx.git"
-CORE_NAME[n64wasm]="n64wasm (Nintendo 64)"
-CORE_SYSTEM[n64wasm]="n64"
-CORE_BUILD[n64wasm]="n64wasm"
-
 # ── Per-core Makefile overrides ────────────────────────────────────────────────
 # CORE_MAKEDIR: subdirectory within the cloned repo that contains the Makefile.
 #               Empty = repo root (the default for most cores).
@@ -129,41 +124,17 @@ CORE_MAKEFILE[picodrive]="Makefile.libretro"
 CORE_MAKEFILE[fbalpha2012_cps1]="makefile.libretro"  # note lowercase 'm'
 
 # CORE_MEMORY: INITIAL_MEMORY (bytes) passed to emcc for each core.
-# Default is 64 MB (67108864). N64 cores need a larger initial heap because
-# the emulated system itself has 4–8 MB RAM plus plugin buffers; 256 MB gives
-# comfortable headroom for the mupen64plus dynarec and texture cache.
+# Default is 64 MB (67108864).
 declare -A CORE_MEMORY
-CORE_MEMORY[n64wasm]="268435456"   # 256 MB
 
 # CORE_LINK_EXTRA: additional emcc/wasm-ld flags appended verbatim to the
 # link_core emcc command for specific cores (space-separated).
-#
-# n64wasm: link Emscripten's OpenGL ES 3 library so that:
-#   1. Compiled C wrappers for every GL/GLES3 function (emscripten_glXxx) are
-#      included in the WASM binary and registered in the function table.
-#   2. emscripten_GetProcAddress is compiled in; it maps a GL function name to
-#      the WASM table index of the corresponding emscripten_glXxx wrapper.
-#      GLideN64 calls rglgen_resolve_symbols(get_proc_address) on init; our
-#      JS get_proc_address callback forwards to emscripten_GetProcAddress so
-#      every GL function pointer is resolved to a real, callable table index.
-#      Without this, all pointers stay null and retro_load_game traps.
-#   3. --export-if-defined exports emscripten_GetProcAddress into the WASM
-#      binary's export section so JS can call it as M._wasmExports or via
-#      Module._emscripten_GetProcAddress (when in EXPORTED_FUNCTIONS).
-#
-# USE_WEBGL2 + FULL_ES3 tell the GL library to include GLES3 function wrappers
-# (glDrawBuffers, glReadBuffer, glBlitFramebuffer, etc.) that GLideN64 uses.
 declare -A CORE_LINK_EXTRA
-CORE_LINK_EXTRA[n64wasm]='-lGL -s USE_WEBGL2=1 -s FULL_ES3=1 -Wl,--export-if-defined=emscripten_GetProcAddress'
 
 # CORE_EXTRA_EXPORTS: additional symbols appended to EXPORTED_FUNCTIONS for
 # specific cores.  Each value is a comma-prefixed JSON fragment so it can be
 # spliced before the closing ']' of EXPORTED_FN.
-# n64wasm: _emscripten_GetProcAddress must appear in EXPORTED_FUNCTIONS so
-# Emscripten's JS glue creates Module._emscripten_GetProcAddress — the JS
-# wrapper that the frontend uses to resolve GL function-table indices.
 declare -A CORE_EXTRA_EXPORTS
-CORE_EXTRA_EXPORTS[n64wasm]=',"_emscripten_GetProcAddress"'
 
 # ── emcc exported functions (standard libretro C API + allocator) ──────────────
 EXPORTED_FN='["_retro_init","_retro_deinit","_retro_get_system_info","_retro_get_system_av_info","_retro_set_environment","_retro_set_video_refresh","_retro_set_input_poll","_retro_set_input_state","_retro_set_audio_sample","_retro_set_audio_sample_batch","_retro_reset","_retro_run","_retro_serialize_size","_retro_serialize","_retro_unserialize","_retro_load_game","_retro_unload_game","_malloc","_free"]'
@@ -476,104 +447,6 @@ build_gearboy() {
     [[ -f "$archive" ]] || die "gearboy: emar archive step failed"
 }
 
-# ── Build mupen64plus-next (n64wasm) ─────────────────────────────────────────
-# mupen64plus-libretro-nx requires special handling for three reasons:
-#
-#   1. The Makefile has no 'platform=emscripten' case; passing it causes the
-#      libretro interface translation unit (retro_init, retro_run, …) to be
-#      compiled under a code-path that omits those symbols.  Omitting the flag
-#      lets emmake's CC=emcc / CXX=em++ override take effect directly.
-#
-#   2. The x86/x86-64 JIT dynarec is incompatible with WebAssembly.
-#      HAVE_DYNAREC=0 and WITH_DYNAREC= disable both the compile-time enable
-#      flag and the architecture-selection variable used by the Makefile.
-#
-#   3. STATIC_LINKING=1 tells the Makefile to target a .a static archive and
-#      skip the shared-lib (.so) link step that wasm-ld cannot satisfy.
-#      For this core the libretro symbols are NOT gated behind STATIC_LINKING,
-#      so there is no missing-symbol risk from using it (unlike gambatte etc.).
-
-build_n64wasm() {
-    local src="$SRC_DIR/n64wasm"
-    local archive="$src/n64wasm_libretro_emscripten.a"
-
-    info "Building n64wasm: emmake HAVE_DYNAREC=0 STATIC_LINKING=1 + emar archive…"
-    emmake make -C "$src" clean 2>/dev/null || true
-
-    # mupen64plus-core/src/api/debugger.c uses tentative (common) symbol
-    # declarations (e.g. bare `int op;`) which WebAssembly does not support.
-    # Emscripten rejects them with "common symbols are not yet implemented for
-    # Wasm", causing make to abort before libretro.cpp is compiled — which is
-    # why retro_init etc. end up missing from the archive.
-    #
-    # EMCC_CFLAGS is appended by emcc to every compilation regardless of what
-    # the Makefile sets for CFLAGS, making it the safest injection point.
-    # -fno-common turns tentative definitions into explicit BSS allocations,
-    # which are fully supported by wasm-ld.
-    EMCC_CFLAGS="-fno-common" emmake make -C "$src" \
-        HAVE_DYNAREC=0 \
-        WITH_DYNAREC= \
-        STATIC_LINKING=1 \
-        -j"$(nproc 2>/dev/null || echo 4)" 2>&1 || true
-
-    local objects
-    mapfile -t objects < <(find "$src" -name "*.o" \
-        -not -path "*/node_modules/*" | sort)
-    [[ ${#objects[@]} -gt 0 ]] || \
-        die "n64wasm: no .o files found — did the compilation step fail?"
-
-    info "Archiving ${#objects[@]} n64wasm object(s) with emar…"
-    rm -f "$archive"
-    emar rcs "$archive" "${objects[@]}"
-    [[ -f "$archive" ]] || die "n64wasm: emar archive step failed"
-
-    # Three symbols are referenced by the archive but absent in a
-    # HAVE_DYNAREC=0 build, causing wasm-ld to abort:
-    #
-    #   sem_timedwait  – POSIX timed semaphore used in opengl_Wrapper.c for
-    #                    SW-renderer thread sync; absent from Emscripten libc.
-    #                    The stub returns -1 (error) which is safe — the call
-    #                    site treats a failed timed wait as a no-op timeout.
-    #   dynarec_jump_to – JIT entry point in r4300_core.c; compiled in even
-    #   dyna_jump         with HAVE_DYNAREC=0 but never executed when the
-    #   dyna_stop         pure interpreter is active.
-    #
-    # NOTE: glReadBuffer was previously stubbed here when hardware rendering
-    # was rejected by the JS frontend.  It is now provided by -lGL (which
-    # supplies the real Emscripten GLES3 wrapper) and must NOT be stubbed or
-    # the no-op stub would override the real WebGL implementation.
-    #
-    # Compile minimal no-op stubs and append them to the archive so wasm-ld
-    # can resolve all symbols without suppressing real undefined-symbol errors.
-    local stubs_c="$src/n64wasm_stubs.c"
-    cat > "$stubs_c" <<'STUBS'
-/* n64wasm_stubs.c — stubs for symbols absent from Emscripten libc/HAVE_DYNAREC=0.
- *
- *   sem_timedwait: POSIX timed semaphore; not in Emscripten libc.
- *     Returns -1 (error/timeout) which the call site treats as a no-op.
- *
- *   dynarec_*: JIT entry points compiled in even with HAVE_DYNAREC=0;
- *     never executed when the pure interpreter is active.
- *
- * glReadBuffer is intentionally NOT stubbed here: -lGL provides the real
- * Emscripten GLES3 wrapper that forwards to WebGL's readBuffer().
- */
-#include <stdint.h>
-
-int  sem_timedwait(void *sem, const void *abstime)           { (void)sem; (void)abstime; return -1; }
-void dynarec_jump_to(uint32_t addr)                          { (void)addr; }
-void dyna_jump(void)                                         {}
-void dyna_stop(int exc)                                      { (void)exc; }
-STUBS
-
-    local stubs_o="$src/n64wasm_stubs.o"
-    emcc -O2 -c "$stubs_c" -o "$stubs_o" \
-        || die "n64wasm: stub compilation failed"
-    emar r "$archive" "$stubs_o" \
-        || die "n64wasm: failed to add stubs to archive"
-    info "Appended n64wasm stubs (sem_timedwait, dynarec symbols)"
-}
-
 # ── Compile one core end-to-end ────────────────────────────────────────────────
 
 build_core() {
@@ -594,9 +467,6 @@ build_core() {
             ;;
         gearboy)
             build_gearboy
-            ;;
-        n64wasm)
-            build_n64wasm
             ;;
         *)
             build_make "$id"

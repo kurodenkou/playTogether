@@ -92,7 +92,7 @@ app.get('/api/cores', (req, res) => {
 //   • Entries are evicted oldest-first when the cache would exceed the limit.
 
 const ROM_CACHE_MAX_BYTES  = 256 * 1024 * 1024; // 256 MB total (cores can be 30–50 MB each)
-const ROM_PROXY_MAX_BYTES  =  64 * 1024 * 1024; //  64 MB per file (covers large N64 WASM)
+const ROM_PROXY_MAX_BYTES  =  64 * 1024 * 1024; //  64 MB per file
 /** @type {Map<string, {buf: Buffer, size: number, ts: number}>} */
 const romCache = new Map();
 let romCacheTotalBytes = 0;

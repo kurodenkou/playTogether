@@ -144,10 +144,8 @@ class RollbackEngine {
       this._tick();
       this._accumulator -= this.FRAME_MS;
       // If one tick consumed more wall-clock time than a single frame budget,
-      // bail out and discard leftover simulated time.  Without this, a slow
-      // core (e.g. N64 without dynarec) triggers 6 back-to-back heavy ticks
-      // per RAF callback, blocking the main thread for seconds at a time and
-      // making Chrome kill the tab as unresponsive.
+      // bail out and discard leftover simulated time so a slow core cannot
+      // block the main thread for multiple ticks per RAF callback.
       if (performance.now() - loopStart > this.FRAME_MS) {
         this._accumulator = 0;
         break;
@@ -159,17 +157,16 @@ class RollbackEngine {
     // ── Inter-frame yield for slow cores ─────────────────────────────────
     // requestAnimationFrame fires immediately when the previous callback
     // returns, leaving zero idle time when _retro_run() consumes the whole
-    // frame budget.  For cores like N64 whose frames regularly exceed
-    // FRAME_MS, we insert a proportional setTimeout gap so the browser can
-    // paint, run GC, and process events between frames.  Fast cores (NES,
-    // SNES) finish well inside the budget and use plain RAF, preserving
+    // frame budget.  For slow cores we insert a proportional setTimeout gap
+    // so the browser can paint, run GC, and process events between frames.
+    // Fast cores finish well inside the budget and use plain RAF, preserving
     // their 60 fps cadence.
     const elapsed = performance.now() - loopStart;
     const overMs  = elapsed - this.FRAME_MS;
     if (overMs > 0) {
       // Yield half the over-budget time, capped at 50 ms, so the browser
       // gets meaningful breathing room without making very slow cores
-      // (e.g. N64 at 5 fps) completely unresponsive.
+      // completely unresponsive.
       const yieldMs = Math.min(Math.round(overMs * 0.5), 50);
       this._yieldId = setTimeout(() => {
         this._yieldId = null;
