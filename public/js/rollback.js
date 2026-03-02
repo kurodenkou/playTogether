@@ -78,6 +78,7 @@ class RollbackEngine {
     // ── Timing ───────────────────────────────────────────────────────────
     this._running = false;
     this._rafId = null;
+    this._yieldId = null; // setTimeout id used to pace slow frames
     this._lastTime = 0;
     this._accumulator = 0;
 
@@ -95,8 +96,8 @@ class RollbackEngine {
 
   stop() {
     this._running = false;
-    if (this._rafId) cancelAnimationFrame(this._rafId);
-    this._rafId = null;
+    if (this._yieldId) { clearTimeout(this._yieldId); this._yieldId = null; }
+    if (this._rafId)   { cancelAnimationFrame(this._rafId); this._rafId = null; }
   }
 
   /**
@@ -154,7 +155,29 @@ class RollbackEngine {
     }
 
     this.emulator.render();
-    this._rafId = requestAnimationFrame(this._loop.bind(this));
+
+    // ── Inter-frame yield for slow cores ─────────────────────────────────
+    // requestAnimationFrame fires immediately when the previous callback
+    // returns, leaving zero idle time when _retro_run() consumes the whole
+    // frame budget.  For cores like N64 whose frames regularly exceed
+    // FRAME_MS, we insert a proportional setTimeout gap so the browser can
+    // paint, run GC, and process events between frames.  Fast cores (NES,
+    // SNES) finish well inside the budget and use plain RAF, preserving
+    // their 60 fps cadence.
+    const elapsed = performance.now() - loopStart;
+    const overMs  = elapsed - this.FRAME_MS;
+    if (overMs > 0) {
+      // Yield half the over-budget time, capped at 50 ms, so the browser
+      // gets meaningful breathing room without making very slow cores
+      // (e.g. N64 at 5 fps) completely unresponsive.
+      const yieldMs = Math.min(Math.round(overMs * 0.5), 50);
+      this._yieldId = setTimeout(() => {
+        this._yieldId = null;
+        if (this._running) this._rafId = requestAnimationFrame(this._loop.bind(this));
+      }, yieldMs);
+    } else {
+      this._rafId = requestAnimationFrame(this._loop.bind(this));
+    }
   }
 
   _tick() {
