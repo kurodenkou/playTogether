@@ -61,14 +61,9 @@
  */
 class LibretroAdapter {
   // Maximum serialized state size (bytes) allowed for rollback snapshots.
-  // N64 cores (mupen64plus-next) report 15–40 MB; saving that every frame
-  // causes GC pressure that pegs the CPU and eventually OOMs Chrome.
-  // Returning null from saveState() for oversized states disables rollback
-  // for that core without affecting gameplay.
-  // N64's RDRAM alone is 4 MB, so any mupen64plus-next state is ≥ 4 MB.
-  // Keeping the threshold just under that leaves rollback enabled for every
-  // other common core (NES ≈50 KB, SNES ≈200 KB, GBA ≈300 KB, PS1 ≈2 MB)
-  // while skipping the expensive serialize/copy for N64.
+  // Cores with very large states (> 4 MB) skip serialization to avoid GC
+  // pressure that would peg the CPU.  All common cores (NES ≈50 KB,
+  // SNES ≈200 KB, GBA ≈300 KB, PS1 ≈2 MB) are well under this limit.
   static MAX_SAVESTATE_BYTES = 4 * 1024 * 1024; // 4 MB
 
   // RETRO_DEVICE_ID_JOYPAD_* constants
@@ -190,8 +185,7 @@ class LibretroAdapter {
       // Wraps specific Emscripten GL stubs in the WASM import object to validate
       // and correct parameter values that WebGL2 rejects but desktop GL accepts.
       //
-      // Problem: some Emscripten builds of hardware-rendered cores (e.g.
-      // mupen64plus-next/GLideN64) call:
+      // Problem: some Emscripten builds of hardware-rendered cores call:
       //   • glBindTexture(GL_TEXTURE_RECTANGLE, …) — target 0x84F5 not in WebGL2
       //   • glPixelStorei(GL_UNPACK_ALIGNMENT, 0)  — alignment must be 1/2/4/8
       // These generate silent WebGL validation errors that prevent shaders and
@@ -371,7 +365,7 @@ class LibretroAdapter {
           }
 
           // Expose the raw WASM module exports.  Symbols exported via wasm-ld
-          // --export-if-defined (e.g. emscripten_GetProcAddress for n64wasm) are
+          // --export-if-defined (e.g. emscripten_GetProcAddress) are
           // available here even when Emscripten's JS glue didn't create Module._xxx
           // wrappers for them (that only happens for EXPORTED_FUNCTIONS entries).
           if (_capturedExports && !live._wasmExports) {
@@ -1065,8 +1059,8 @@ class LibretroAdapter {
         const fboFn = this._addFn(() => 0, 'i');
         M.HEAPU32[(data +  8) >> 2] = fboFn;
 
-        // get_proc_address: GLideN64 calls rglgen_resolve_symbols() with this
-        // callback to obtain WASM table indices for every GL entry point it uses.
+        // get_proc_address: hardware-rendered cores call rglgen_resolve_symbols()
+        // with this callback to obtain WASM table indices for every GL entry point.
         // Null (0) pointers cause a "function signature mismatch" WASM trap
         // on the first indirect call, so we must return real indices.
         //
@@ -1096,7 +1090,7 @@ class LibretroAdapter {
         //  2. M._wasmExports.emscripten_GetProcAddress  — the raw WebAssembly
         //     ExportedFunction; present when the symbol was exported via wasm-ld
         //     --export-if-defined but not listed in EXPORTED_FUNCTIONS.  Directly
-        //     callable from JS with integer arguments; works after the n64wasm rebuild.
+        //     callable from JS with integer arguments.
         //  3. Module.GL internal proc-address API (varies by Emscripten version).
         //  4. Return 0 with a clear rebuild hint.
         const _rawGetProcAddr =
@@ -1117,7 +1111,7 @@ class LibretroAdapter {
           glEGLImageTargetRenderbufferStorageOES: 'vii',   // void(GLenum, GLeglImageOES)
           glEGLImageTargetTexture2DOES:           'vii',   // void(GLenum, GLeglImageOES)
           // GL_KHR_debug / GL_ARB_debug_output — not available in WebGL2.
-          // Cores (e.g. GLideN64) probe/call these via get_proc_address; a ZERO
+          // Hardware-rendered cores probe/call these via get_proc_address; a ZERO
           // table index causes a call_indirect trap.  Register harmless no-ops.
           glDebugMessageControl:   'viiiiii', // void(GLenum src, GLenum type, GLenum sev, GLsizei n, const GLuint* ids, GLboolean en)
           glDebugMessageCallback:  'vii',     // void(GLDEBUGPROC cb, const void* userParam)
@@ -1131,7 +1125,7 @@ class LibretroAdapter {
           glGetObjectPtrLabel:     'viiii',   // void(const void* ptr, GLsizei bufSz, GLsizei* len, GLchar* label)
           // Indexed per-buffer GL 3.x / OpenGL 4.0 functions — not exposed by
           // Emscripten's proc address resolver unless built with FULL_ES3.
-          // Hardware-rendered cores (e.g. GLideN64) probe these; a ZERO table
+          // Hardware-rendered cores probe these; a ZERO table
           // index causes a call_indirect trap, so register harmless no-ops.
           glDisablei:              'vii',    // void(GLenum cap, GLuint index)
           glEnablei:               'vii',    // void(GLenum cap, GLuint index)
@@ -1142,8 +1136,8 @@ class LibretroAdapter {
           glBlendFunci:            'viii',   // void(GLuint buf, GLenum src, GLenum dst)
           glBlendFuncSeparatei:    'viiiii', // void(GLuint buf, GLenum srcRGB, dstRGB, srcA, dstA)
           // OpenGL 1D-texture functions — 1D textures do not exist in WebGL.
-          // GLideN64 (and other N64 renderers) call rglgen_resolve_symbols() which
-          // probes these; a ZERO table index causes a call_indirect trap.
+          // Hardware-rendered cores call rglgen_resolve_symbols() which probes
+          // these; a ZERO table index causes a call_indirect trap.
           glTexImage1D:             'viiiiiiii', // void(target,level,internalformat,width,border,format,type,data*) — 8 params
           glTexSubImage1D:          'viiiiiii',  // void(target,level,xoffset,width,format,type,pixels*) — 7 params
           glCopyTexImage1D:         'viiiiiii',  // void(target,level,internalformat,x,y,width,border) — 7 params
@@ -1230,7 +1224,7 @@ class LibretroAdapter {
             '[LibretroAdapter] get_proc_address: Path 4 — no resolver found.',
             '_emscripten_GetProcAddress is missing from WASM exports.',
             'Every GL function pointer will be 0; retro_load_game WILL trap.',
-            'Fix: rebuild the n64wasm core:  scripts/build-core.sh n64wasm',
+            'Fix: rebuild the core with -lGL -s USE_WEBGL2=1 -s FULL_ES3=1 -Wl,--export-if-defined=emscripten_GetProcAddress',
           );
           return (namePtr) => 0;
         })();
@@ -1492,8 +1486,7 @@ class LibretroAdapter {
     if (!resp.ok) {
       throw new Error(`ROM fetch failed: HTTP ${resp.status} — ${resp.statusText}`);
     }
-    const rawBuf = await resp.arrayBuffer();
-    const buf    = LibretroAdapter._normalizeN64Rom(rawBuf);
+    const buf = await resp.arrayBuffer();
 
     await this._initAudio();
 
@@ -2173,7 +2166,7 @@ class LibretroAdapter {
     }
 
     // ── Post-retro_run GL presentation (HW cores) ────────────────────────────
-    // Some libretro GL cores (e.g. GLideN64) render their final output into an
+    // Some libretro GL cores render their final output into an
     // internal FBO and leave it bound — they rely on the frontend to blit that
     // FBO to the default framebuffer (the canvas).  If the core left a non-null
     // FBO bound after retro_run, we perform a simple glBlitFramebuffer pass to
@@ -2248,11 +2241,10 @@ class LibretroAdapter {
     const M    = this.M;
     const size = M._retro_serialize_size();
     if (!size) return null;
-    // Skip serialization for cores whose state exceeds the rollback size limit
-    // (e.g. N64 / mupen64plus-next: 15–40 MB).  Allocating and GC-ing that
-    // every frame at 60 fps causes a sustained CPU spike and eventually an OOM
-    // crash in Chrome.  Returning null here disables rollback for this core
-    // without affecting normal gameplay.
+    // Skip serialization for cores whose state exceeds the rollback size limit.
+    // Allocating and GC-ing a large buffer every frame at 60 fps causes a
+    // sustained CPU spike and eventually an OOM crash.  Returning null here
+    // disables rollback for that core without affecting normal gameplay.
     if (size > LibretroAdapter.MAX_SAVESTATE_BYTES) {
       if (!this._warnedStateTooLarge) {
         this._warnedStateTooLarge = true;
@@ -2298,48 +2290,4 @@ class LibretroAdapter {
     this.ctx.putImageData(this._imageData, 0, 0);
   }
 
-  /**
-   * N64 ROMs are distributed in three byte-order variants.
-   * mupen64plus-next (n64wasm) requires big-endian / .z64 layout — first word
-   * must be 0x80371240.  Silently normalise .v64 and .n64 images so the core
-   * never sees a mis-ordered ROM.  Buffers whose first word does not match any
-   * N64 magic are returned unchanged (no-op for every other system).
-   *
-   * Format detection:
-   *   .z64  big-endian (native)  80 37 12 40  — no conversion needed
-   *   .v64  word-swapped         37 80 40 12  — swap each adjacent byte pair
-   *   .n64  little-endian        40 12 37 80  — reverse each 4-byte group
-   *
-   * @param {ArrayBuffer} buf
-   * @returns {ArrayBuffer}
-   */
-  static _normalizeN64Rom(buf) {
-    if (buf.byteLength < 4) return buf;
-    const magic = new DataView(buf).getUint32(0, false /* big-endian */);
-
-    // Already .z64 — nothing to do.
-    if (magic === 0x80371240) return buf;
-
-    const out = new Uint8Array(buf.slice(0));
-
-    if (magic === 0x37804012) {
-      // .v64: swap every adjacent byte pair  (37 80 → 80 37, 40 12 → 12 40)
-      for (let i = 0; i + 1 < out.length; i += 2) {
-        const t = out[i]; out[i] = out[i + 1]; out[i + 1] = t;
-      }
-      return out.buffer;
-    }
-
-    if (magic === 0x40123780) {
-      // .n64: reverse each 4-byte group  (40 12 37 80 → 80 37 12 40)
-      for (let i = 0; i + 3 < out.length; i += 4) {
-        let t;
-        t = out[i];     out[i]     = out[i + 3]; out[i + 3] = t;
-        t = out[i + 1]; out[i + 1] = out[i + 2]; out[i + 2] = t;
-      }
-      return out.buffer;
-    }
-
-    return buf; // unrecognised magic — pass through unchanged
-  }
 }
