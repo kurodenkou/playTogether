@@ -71,6 +71,12 @@ class RollbackEngine {
       if (pid !== localPlayerId) this.lastReceivedFrame.set(pid, -1);
     }
 
+    // ── Controller sharing ────────────────────────────────────────────────
+    /** Slot IDs this client has adopted (locally controlled, not tracked as remote). */
+    this._adoptedSlots = new Set();
+    /** When true, stop sending local input for localPlayerId (slot was surrendered). */
+    this._localSurrendered = false;
+
     // ── Rollback pending flag ─────────────────────────────────────────────
     /** Frame to roll back to next tick, or null. */
     this._rollbackTo = null;
@@ -101,12 +107,34 @@ class RollbackEngine {
   }
 
   /**
+   * Adopt a controller slot that another player has transferred here.
+   * Removes the slot from remote tracking and starts sending local input for it.
+   * @param {string} slotId  the playerId whose slot is being adopted
+   */
+  adoptSlot(slotId) {
+    this._adoptedSlots.add(slotId);
+    this.lastReceivedFrame.delete(slotId);
+  }
+
+  /**
+   * Surrender the local player's own slot to another player.
+   * Stops sending input for localPlayerId and starts tracking it as remote.
+   */
+  surrenderLocalSlot() {
+    this._localSurrendered = true;
+    // Track as remote from current frame so confirmedFrame can still advance
+    this.lastReceivedFrame.set(this.localPlayerId, this.frame + this.INPUT_DELAY);
+  }
+
+  /**
    * Called by the network layer when a remote input arrives.
    * May trigger a rollback on the next tick if the input contradicts
    * what we predicted.
    */
   receiveRemoteInput(frame, playerId, input) {
-    if (playerId === this.localPlayerId) return;
+    // Ignore echo of own inputs (local + adopted slots are generated here)
+    if (playerId === this.localPlayerId && !this._localSurrendered) return;
+    if (this._adoptedSlots.has(playerId)) return;
 
     // Check for misprediction (only if we already simulated this frame)
     if (frame < this.frame) {
@@ -179,10 +207,21 @@ class RollbackEngine {
 
   _tick() {
     // ① Queue local input with delay and broadcast
-    const localInput = this.readInput();
     const queueFrame = this.frame + this.INPUT_DELAY;
-    this._storeInput(queueFrame, this.localPlayerId, localInput);
-    this._sendInput(queueFrame, localInput);
+
+    // Send for own slot unless it has been surrendered to another player
+    if (!this._localSurrendered) {
+      const localInput = this.readInput();
+      this._storeInput(queueFrame, this.localPlayerId, localInput);
+      this._sendInput(queueFrame, this.localPlayerId, localInput);
+    }
+
+    // Send input for any adopted (transferred-in) controller slots
+    for (const adoptedId of this._adoptedSlots) {
+      const adoptedInput = this.readInput();
+      this._storeInput(queueFrame, adoptedId, adoptedInput);
+      this._sendInput(queueFrame, adoptedId, adoptedInput);
+    }
 
     // ② Execute pending rollback
     if (this._rollbackTo !== null) {
@@ -292,9 +331,11 @@ class RollbackEngine {
 
   // ── Network send hook (overridden by app.js) ──────────────────────────────
 
-  /** @param {number} frame @param {number} input */
-  _sendInput(frame, input) {
+  /** @param {number} frame @param {string} slotPlayerId @param {number} input */
+  _sendInput(frame, slotPlayerId, input) {
     // Overridden by the application layer to actually transmit the input.
+    // slotPlayerId identifies which controller slot the input belongs to;
+    // it may differ from localPlayerId when the player has adopted a transferred slot.
     // Default no-op for single-player / offline use.
   }
 }

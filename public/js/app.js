@@ -34,6 +34,13 @@ let inputMgr = null;
 /** @type {Array|null} cached result from GET /api/cores (null = not yet fetched) */
 let _coresCache = null;
 
+/**
+ * Maps slotPlayerId → actualClientId (who currently controls each controller slot).
+ * Populated when a game starts; updated on controller-transferred events.
+ * @type {Map<string, string>}
+ */
+let controllerMap = new Map();
+
 // ── Boot ──────────────────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -95,15 +102,16 @@ function getPlayerName() {
 
 function bindNetworkEvents() {
   net
-    .on('room-created',  onRoomCreated)
-    .on('room-joined',   onRoomJoined)
-    .on('player-joined', onPlayerJoined)
-    .on('player-left',   onPlayerLeft)
-    .on('host-changed',  onHostChanged)
-    .on('game-started',  onGameStarted)
-    .on('rematch',       onRematch)
-    .on('input',         onRemoteInput)
-    .on('chat',          onChat)
+    .on('room-created',          onRoomCreated)
+    .on('room-joined',           onRoomJoined)
+    .on('player-joined',         onPlayerJoined)
+    .on('player-left',           onPlayerLeft)
+    .on('host-changed',          onHostChanged)
+    .on('game-started',          onGameStarted)
+    .on('rematch',               onRematch)
+    .on('input',                 onRemoteInput)
+    .on('controller-transferred', onControllerTransferred)
+    .on('chat',                  onChat)
     .on('error', msg => {
       showStatus('lobby', msg.message, true);
       el('createRoomBtn').disabled = false;
@@ -151,6 +159,10 @@ async function onGameStarted(msg) {
   el('loadingOverlay').classList.remove('hidden');
   el('loadingOverlay').textContent = 'Loading…';
 
+  // Initialise controller map: each player controls their own slot
+  controllerMap = new Map();
+  for (const pid of msg.playerOrder) controllerMap.set(pid, pid);
+
   try {
     if (msg.gameType === 'snes') {
       await startSNESGame(msg.playerOrder, msg.seed, msg.romUrl);
@@ -171,16 +183,59 @@ async function onGameStarted(msg) {
 
 function onRematch() {
   stopGame();
+  controllerMap = new Map();
   el('preGamePanel').classList.remove('hidden');
   el('gamePanel').classList.add('hidden');
   el('loadingOverlay').classList.add('hidden');
   el('loadingOverlay').classList.remove('error');
   updateHostControls();
+  updatePlayerList();
   addChatLine('system', 'Host started a rematch — waiting for players.');
 }
 
 function onRemoteInput(msg) {
   engine?.receiveRemoteInput(msg.frame, msg.playerId, msg.input);
+}
+
+function onControllerTransferred(msg) {
+  const { slotPlayerId, toPlayerId } = msg;
+  const prevController = controllerMap.get(slotPlayerId);
+
+  controllerMap.set(slotPlayerId, toPlayerId);
+
+  if (engine) {
+    const myId = roomState.playerId;
+
+    // If I previously controlled this slot and am now giving it up
+    if (prevController === myId && toPlayerId !== myId) {
+      if (slotPlayerId === myId) {
+        // Surrendering my own slot to another player
+        engine.surrenderLocalSlot();
+      } else {
+        // I had adopted this slot; release it back to remote tracking
+        engine._adoptedSlots.delete(slotPlayerId);
+        engine.lastReceivedFrame.set(slotPlayerId, engine.frame + engine.INPUT_DELAY);
+      }
+    }
+
+    // If I am the new controller of this slot
+    if (toPlayerId === myId && slotPlayerId !== myId) {
+      engine.adoptSlot(slotPlayerId);
+    }
+  }
+
+  updatePlayerList();
+
+  const slotName = _slotLabel(slotPlayerId);
+  const toPlayer = roomState.players.find(p => p.id === toPlayerId);
+  addChatLine('system', `${slotName} controller passed to ${escHtml(toPlayer?.name ?? 'Unknown')}.`);
+}
+
+/** Returns a human-readable slot label like "1P" for the given slot player ID. */
+function _slotLabel(slotPlayerId) {
+  const playerOrder = [...controllerMap.keys()];
+  const idx = playerOrder.indexOf(slotPlayerId);
+  return idx >= 0 ? `${idx + 1}P` : 'Slot';
 }
 
 function onChat(msg) {
@@ -295,7 +350,6 @@ function _wireCoreSelect() {
 
 function syncGameTypeUI() {
   const gameType      = el('gameTypeSelect').value;
-  const isHost        = roomState?.hostId === roomState?.playerId;
   const isRetroarch   = gameType === 'retroarch';
   const isRomEmulator = gameType === 'nes' || gameType === 'snes' || isRetroarch;
 
@@ -320,10 +374,11 @@ function syncGameTypeUI() {
     el('romUrlInput').placeholder  = 'https://example.com/game.nes';
   }
 
-  el('gameTypeSelect').disabled    = !isHost;
-  el('romUrlInput').disabled       = !isHost;
-  el('coreUrlInput').disabled      = !isHost;
-  el('coreWasmUrlInput').disabled  = !isHost;
+  // All players can configure and start a game — no host restriction on inputs
+  el('gameTypeSelect').disabled   = false;
+  el('romUrlInput').disabled      = false;
+  el('coreUrlInput').disabled     = false;
+  el('coreWasmUrlInput').disabled = false;
 }
 
 function updateRoomInfo() {
@@ -333,25 +388,123 @@ function updateRoomInfo() {
 function updatePlayerList() {
   const list = el('playerList');
   list.innerHTML = '';
+  const gameActive = !el('gamePanel').classList.contains('hidden');
+
+  // Build a reverse lookup: actual client ID → slot player ID they currently control
+  const myControlledSlot = _findControlledSlot(roomState.playerId);
+
   for (const p of roomState.players) {
     const li = document.createElement('li');
     li.className = 'player-item' + (p.id === roomState.playerId ? ' self' : '');
 
-    const badge  = p.id === roomState.hostId ? '<span class="badge host">HOST</span>' : '';
-    const youTag = p.id === roomState.playerId ? ' <span class="badge you">YOU</span>' : '';
+    const hostBadge = p.id === roomState.hostId ? '<span class="badge host">HOST</span>' : '';
+    const youTag    = p.id === roomState.playerId ? ' <span class="badge you">YOU</span>' : '';
 
-    li.innerHTML = `<span class="player-name">${escHtml(p.name)}${youTag}</span>${badge}`;
+    // Show which controller slot this player currently controls (if game is active)
+    let slotBadge = '';
+    if (gameActive && controllerMap.size > 0) {
+      const controlledSlot = _findControlledSlot(p.id);
+      if (controlledSlot !== null) {
+        const slotIdx = [...controllerMap.keys()].indexOf(controlledSlot);
+        slotBadge = `<span class="badge slot">${slotIdx + 1}P</span>`;
+      }
+    }
+
+    // "Pass" button: shown on your own row during game when you control a slot,
+    // so you can hand it off to another player.
+    let passBtn = '';
+    if (gameActive && p.id === roomState.playerId && myControlledSlot !== null) {
+      passBtn = '<button class="pass-btn" title="Pass your controller to another player">Pass</button>';
+    }
+
+    li.innerHTML =
+      `<span class="player-name">${escHtml(p.name)}${youTag}</span>` +
+      `<span class="player-badges">${slotBadge}${hostBadge}</span>` +
+      passBtn;
+
+    // Wire up "Pass" button
+    if (passBtn) {
+      li.querySelector('.pass-btn').addEventListener('click', () => _openPassDialog(myControlledSlot));
+    }
+
     list.appendChild(li);
   }
 }
 
+/**
+ * Returns the slot player ID that `clientId` currently controls,
+ * or null if they are spectating.
+ * @param {string} clientId
+ * @returns {string|null}
+ */
+function _findControlledSlot(clientId) {
+  for (const [slotId, controllerId] of controllerMap) {
+    if (controllerId === clientId) return slotId;
+  }
+  return null;
+}
+
+/**
+ * Show the inline "pass controller" dialog so the player can pick a recipient.
+ * @param {string} slotPlayerId  the slot being passed
+ */
+function _openPassDialog(slotPlayerId) {
+  // Remove any existing dialog first
+  const existing = el('passDialog');
+  if (existing) existing.remove();
+
+  const dialog = document.createElement('div');
+  dialog.id = 'passDialog';
+  dialog.className = 'pass-dialog';
+
+  const label = document.createElement('span');
+  label.textContent = 'Pass to:';
+
+  const select = document.createElement('select');
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.textContent = '— select player —';
+  select.appendChild(placeholder);
+
+  for (const p of roomState.players) {
+    if (p.id === roomState.playerId) continue; // skip self
+    const opt = document.createElement('option');
+    opt.value = p.id;
+    opt.textContent = escHtml(p.name);
+    select.appendChild(opt);
+  }
+
+  const confirmBtn = document.createElement('button');
+  confirmBtn.textContent = 'Pass';
+  confirmBtn.className = 'primary';
+  confirmBtn.style.padding = '4px 10px';
+  confirmBtn.addEventListener('click', () => {
+    const toPlayerId = select.value;
+    if (!toPlayerId) return;
+    net.send({ type: 'transfer-controller', slotPlayerId, toPlayerId });
+    dialog.remove();
+  });
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.textContent = '✕';
+  cancelBtn.style.padding = '4px 8px';
+  cancelBtn.addEventListener('click', () => dialog.remove());
+
+  dialog.appendChild(label);
+  dialog.appendChild(select);
+  dialog.appendChild(confirmBtn);
+  dialog.appendChild(cancelBtn);
+
+  // Insert below the player list
+  el('playerList').insertAdjacentElement('afterend', dialog);
+}
+
 function updateHostControls() {
-  const isHost       = roomState.hostId === roomState.playerId;
-  const gameVisible  = !el('gamePanel').classList.contains('hidden');
-  el('startGameBtn').classList.toggle('hidden', !isHost || gameVisible);
-  el('rematchBtn').classList.toggle('hidden',   !isHost || !gameVisible);
-  el('gameTypeSelect').disabled = !isHost;
-  el('romUrlInput').disabled    = !isHost;
+  const isHost      = roomState.hostId === roomState.playerId;
+  const gameVisible = !el('gamePanel').classList.contains('hidden');
+  // Any player can start a game; only the host can call a rematch
+  el('startGameBtn').classList.toggle('hidden', gameVisible);
+  el('rematchBtn').classList.toggle('hidden', !isHost || !gameVisible);
 }
 
 // ── Game lifecycle ────────────────────────────────────────────────────────────
@@ -501,13 +654,14 @@ function _startEngine(playerOrder) {
     onStats:       updateStatsHUD,
   });
 
-  engine._sendInput = (frame, input) => {
-    net.send({ type: 'input', frame, input });
+  engine._sendInput = (frame, slotPlayerId, input) => {
+    net.send({ type: 'input', frame, playerId: slotPlayerId, input });
   };
 
   engine.start();
 
   updateHostControls();
+  updatePlayerList();
   el('rematchBtn').classList.toggle('hidden', roomState.hostId !== roomState.playerId);
 }
 
