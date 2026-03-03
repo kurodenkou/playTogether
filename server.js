@@ -308,9 +308,9 @@ wss.on('connection', (ws) => {
         break;
       }
 
-      // ── Host starts the game ────────────────────────────────────────────
+      // ── Any player starts the game ─────────────────────────────────────
       case 'start-game': {
-        if (!room || room.hostId !== playerId) return;
+        if (!room || !playerId) return;
         if (room.gameStarted) return;
 
         room.gameStarted = true;
@@ -352,12 +352,33 @@ wss.on('connection', (ws) => {
       // ── Relay player input to all OTHER players in the room ─────────────
       case 'input': {
         if (!room || !playerId) return;
+        // Allow relaying input for an adopted controller slot (msg.playerId may differ
+        // from the sender's own playerId when a player has taken over another slot).
+        const inputFor = typeof msg.playerId === 'string' && room.players.has(msg.playerId)
+          ? msg.playerId
+          : playerId;
         room.broadcast({
           type: 'input',
           frame: msg.frame | 0,
-          playerId,
+          playerId: inputFor,
           input: msg.input | 0,
         }, playerId);
+        break;
+      }
+
+      // ── Transfer a controller slot to another player ─────────────────────
+      case 'transfer-controller': {
+        if (!room || !playerId) return;
+        const slotPlayerId = String(msg.slotPlayerId ?? '');
+        const toPlayerId   = String(msg.toPlayerId   ?? '');
+        if (!room.players.has(slotPlayerId) || !room.players.has(toPlayerId)) return;
+        if (slotPlayerId === toPlayerId) return;
+        room.broadcastAll({
+          type: 'controller-transferred',
+          slotPlayerId,
+          toPlayerId,
+        });
+        console.log(`[room] controller ${slotPlayerId} → ${toPlayerId} in ${room.id}`);
         break;
       }
 
