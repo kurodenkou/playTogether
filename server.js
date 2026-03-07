@@ -503,6 +503,16 @@ wss.on('connection', (ws) => {
       return;
     }
 
+    // If a player disconnects while we're waiting for rom-ready confirmations,
+    // re-evaluate whether the remaining players are all ready.
+    if (room.gameStarted && room.playerOrder.length > 0) {
+      const allReady = room.playerOrder.every(id => room.romReady.has(id));
+      if (allReady) {
+        room.broadcastAll({ type: 'all-ready' });
+        console.log(`[room] all-ready (after disconnect) in ${room.id}`);
+      }
+    }
+
     // Transfer host if needed
     if (room.hostId === pId) {
       room.hostId = [...room.players.keys()][0];
