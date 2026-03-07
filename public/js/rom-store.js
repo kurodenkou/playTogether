@@ -32,89 +32,121 @@ class ROMStore {
   }
 
   /**
-   * Read a File from disk, store its bytes in local PouchDB, and replicate
-   * to the server so other clients in the room can fetch it.
+   * Read a File from disk, store its bytes in local PouchDB, and upload
+   * directly to the server so guests can download it.
    *
    * @param {File} file  The ROM file selected by the user
+   * @param {function} [onProgress]  optional (message: string) => void callback
    * @returns {Promise<{romId: string, filename: string}>}
    */
-  async storeROM(file) {
-    const bytes  = await file.arrayBuffer();
-    const romId  = await _sha256hex(bytes);
-    const docId  = `rom:${romId}`;
+  async storeROM(file, onProgress) {
+    onProgress?.('Hashing ROM…');
+    const bytes = await file.arrayBuffer();
+    const romId = await _sha256hex(bytes);
+    const docId = `rom:${romId}`;
 
-    // Check whether we already have this exact ROM locally (fast path)
-    let existingDoc = null;
-    try {
-      existingDoc = await this._local.get(docId, { attachments: false });
-    } catch (e) {
-      if (e.status !== 404) throw e;
+    // Cache locally in PouchDB (skip if already stored)
+    const alreadyLocal = await this._tryLoadLocal(docId);
+    if (!alreadyLocal) {
+      onProgress?.('Caching ROM locally…');
+      await this._local.put({ _id: docId, filename: file.name });
+      const doc = await this._local.get(docId);
+      await this._local.putAttachment(
+        docId, 'data', doc._rev,
+        new Blob([bytes], { type: 'application/octet-stream' }),
+        'application/octet-stream',
+      );
     }
 
-    if (existingDoc) {
-      // ROM is already in local PouchDB; just make sure the server has it too
-      await this._replicateTo();
-      return { romId, filename: file.name };
-    }
-
-    // Store metadata doc
-    await this._local.put({ _id: docId, filename: file.name });
-    const doc = await this._local.get(docId);
-
-    // Store ROM bytes as an attachment
-    await this._local.putAttachment(
-      docId, 'data', doc._rev,
-      new Blob([bytes], { type: 'application/octet-stream' }),
-      'application/octet-stream',
-    );
-
-    // Replicate to server so guests can pull it
-    await this._replicateTo();
+    // Upload directly to server via HTTP (reliable, no PouchDB replication quirks)
+    onProgress?.('Uploading ROM to server…');
+    await this._uploadDirect(romId, file.name, bytes);
 
     return { romId, filename: file.name };
   }
 
   /**
-   * Load a ROM's bytes from local PouchDB, replicating from the server first
-   * if the document is not present locally.  Retries with back-off to handle
-   * the case where the host's upload replication is still in-flight.
+   * Load a ROM's bytes, trying local cache first then downloading from server.
+   * Retries with back-off in case the host's upload is still in-flight.
    *
    * @param {string} romId       SHA-256 hex of the ROM content
-   * @param {string} [filename]  fallback filename if not stored in PouchDB
+   * @param {string} [filename]  fallback filename hint
    * @param {function} [onProgress]  optional (message: string) => void callback
    * @returns {Promise<{bytes: ArrayBuffer, filename: string}>}
    */
   async loadROM(romId, filename = 'rom', onProgress) {
     const docId = `rom:${romId}`;
 
-    // Try local first (host already has it, or cached from a prior session)
+    // Try local PouchDB cache first (host already has it; guests get it after first download)
     const local = await this._tryLoadLocal(docId);
     if (local) return local;
 
-    // Pull from server with retries — the host's replication may still be
-    // in-flight when guests receive game-started and start fetching.
+    // Download directly from server with retries
     const MAX_ATTEMPTS = 8;
     const RETRY_DELAY_MS = 2000;
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       const label = attempt === 1
-        ? 'Fetching ROM from server…'
-        : `Fetching ROM… (retry ${attempt - 1}/${MAX_ATTEMPTS - 1})`;
+        ? 'Downloading ROM from server…'
+        : `Downloading ROM… (retry ${attempt - 1}/${MAX_ATTEMPTS - 1})`;
       onProgress?.(label);
 
-      await this._replicateFrom(docId);
-      const result = await this._tryLoadLocal(docId);
-      if (result) return result;
+      const result = await this._downloadDirect(romId);
+      if (result) {
+        // Cache locally so future games/rematches skip the download
+        await this._cacheLocal(docId, result.filename, result.bytes);
+        return result;
+      }
 
       if (attempt < MAX_ATTEMPTS) {
         await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
       }
     }
 
-    throw new Error('ROM not found on server after several attempts — check that the host\'s file synced successfully.');
+    throw new Error('ROM not found on server — use the Sync button to re-upload it.');
   }
 
   // ── Private helpers ────────────────────────────────────────────────────────
+
+  async _uploadDirect(romId, filename, bytes) {
+    const resp = await fetch('/api/rom', {
+      method: 'POST',
+      headers: {
+        'Content-Type':    'application/octet-stream',
+        'x-rom-id':        romId,
+        'x-rom-filename':  filename,
+      },
+      body: bytes,
+    });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => resp.status);
+      throw new Error(`ROM upload failed: ${text}`);
+    }
+  }
+
+  async _downloadDirect(romId) {
+    const resp = await fetch(`/api/rom/${encodeURIComponent(romId)}`);
+    if (resp.status === 404) return null;
+    if (!resp.ok) throw new Error(`ROM download failed: ${resp.status}`);
+    const bytes    = await resp.arrayBuffer();
+    const filename = resp.headers.get('x-rom-filename') ?? 'rom';
+    return { bytes, filename };
+  }
+
+  async _cacheLocal(docId, filename, bytes) {
+    try {
+      await this._local.put({ _id: docId, filename });
+      const doc = await this._local.get(docId);
+      await this._local.putAttachment(
+        docId, 'data', doc._rev,
+        new Blob([bytes], { type: 'application/octet-stream' }),
+        'application/octet-stream',
+      );
+    } catch (e) {
+      // Already cached (conflict) — ignore
+      if (e.status !== 409) console.warn('[rom-store] cache write failed', e);
+    }
+  }
 
   async _tryLoadLocal(docId) {
     try {
@@ -125,22 +157,6 @@ class ROMStore {
       if (e.status === 404) return null;
       throw e;
     }
-  }
-
-  async _replicateTo() {
-    return new Promise((resolve, reject) => {
-      this._local.replicate.to(this._remote, { live: false })
-        .on('complete', resolve)
-        .on('error',    reject);
-    });
-  }
-
-  async _replicateFrom(docId) {
-    return new Promise((resolve, reject) => {
-      this._local.replicate.from(this._remote, { live: false, doc_ids: [docId] })
-        .on('complete', resolve)
-        .on('error',    reject);
-    });
   }
 }
 
