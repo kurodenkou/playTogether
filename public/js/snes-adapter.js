@@ -83,7 +83,17 @@ class SNESAdapter {
       throw new Error(`ROM fetch error: HTTP ${resp.status} — ${resp.statusText}`);
     }
 
-    const buf = await resp.arrayBuffer();
+    await this.loadROMBytes(await resp.arrayBuffer());
+  }
+
+  /**
+   * Load a SNES ROM from an ArrayBuffer (e.g. from local file or PouchDB sync).
+   * @param {ArrayBuffer} buf  Raw ROM bytes
+   */
+  async loadROMBytes(buf) {
+    if (typeof window.snineX === 'undefined') {
+      throw new Error('snes9x not loaded — make sure snes9x.js is included before snes-adapter.js');
+    }
 
     // Wait for WASM to be ready (snes9x.js initialises asynchronously)
     await this._waitForWasm();

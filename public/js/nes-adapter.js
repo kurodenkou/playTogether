@@ -167,7 +167,14 @@ class NESAdapter {
     if (!resp.ok) {
       throw new Error(`ROM fetch error: HTTP ${resp.status} — ${resp.statusText}`);
     }
-    const buf   = await resp.arrayBuffer();
+    await this.loadROMBytes(await resp.arrayBuffer());
+  }
+
+  /**
+   * Load a ROM from an ArrayBuffer (e.g. from local file or PouchDB sync).
+   * @param {ArrayBuffer} buf  Raw ROM bytes
+   */
+  async loadROMBytes(buf) {
     const bytes = new Uint8Array(buf);
 
     // jsnes expects a binary string (char-per-byte)
