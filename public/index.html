@@ -147,6 +147,12 @@
           <span class="field-hint">The URL is fetched server-side (no CORS issues).</span>
         </div>
 
+        <div id="romFileRow" class="field-group hidden" style="margin-bottom:10px;">
+          <label for="romFileInput">— or ROM File (desktop)</label>
+          <input type="file" id="romFileInput" accept=".nes,.sfc,.smc,.rom,.zip,.gb,.gbc,.gba,.md,.smd,.gen,.pce,.nds">
+          <span id="romFileStatus" class="field-hint">Pick a file from your computer — synced to all players via PouchDB.</span>
+        </div>
+
         <div class="host-controls">
           <button id="startGameBtn" class="primary hidden">Start Game</button>
           <button id="rematchBtn" class="hidden">Rematch</button>
@@ -168,6 +174,8 @@
 </div><!-- /view-room -->
 
 <!-- ── Scripts ────────────────────────────────────────────────────────────── -->
+<!-- PouchDB — IndexedDB-backed database with CouchDB sync (used for ROM sharing) -->
+<script src="https://cdn.jsdelivr.net/npm/pouchdb@9.0.0/dist/pouchdb.min.js"></script>
 <!-- jsnes browser bundle (served from node_modules by the server) -->
 <script src="/js/jsnes.js"></script>
 <!-- snes9x browser bundle (snes9x2005-wasm + snineX helpers; audio via AudioWorklet) -->
@@ -178,6 +186,7 @@
 <script src="js/nes-adapter.js"></script>
 <script src="js/snes-adapter.js"></script>
 <script src="js/libretro-adapter.js"></script>
+<script src="js/rom-store.js"></script>
 <script src="js/network.js"></script>
 <script src="js/input.js"></script>
 <script src="js/app.js"></script>

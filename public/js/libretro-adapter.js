@@ -1486,7 +1486,26 @@ class LibretroAdapter {
     if (!resp.ok) {
       throw new Error(`ROM fetch failed: HTTP ${resp.status} — ${resp.statusText}`);
     }
-    const buf = await resp.arrayBuffer();
+    const buf      = await resp.arrayBuffer();
+    const filename = new URL(url, location.href).pathname.split('/').filter(Boolean).pop() ?? 'rom';
+    await this._loadROMBuffer(buf, filename);
+  }
+
+  /**
+   * Load a ROM from an ArrayBuffer (e.g. from local file or PouchDB sync).
+   * @param {ArrayBuffer} buf       Raw ROM bytes
+   * @param {string}      [filename]  Original filename for extension sniffing (default 'rom')
+   */
+  async loadROMBytes(buf, filename = 'rom') {
+    await this._loadROMBuffer(buf, filename);
+  }
+
+  /**
+   * Core ROM-loading logic shared by loadROM() and loadROMBytes().
+   * @param {ArrayBuffer} buf
+   * @param {string}      filename
+   */
+  async _loadROMBuffer(buf, filename) {
 
     await this._initAudio();
 
@@ -1504,9 +1523,6 @@ class LibretroAdapter {
     M._retro_get_system_info(sysInfoPtr);
     const needFullPath = M.HEAPU8[sysInfoPtr + 12] !== 0;
     M._free(sysInfoPtr);
-
-    // Extract the filename (e.g. "mario.sfc") for path/extension sniffing.
-    const filename = new URL(url, location.href).pathname.split('/').filter(Boolean).pop() ?? 'rom';
 
     let ok = false;
 

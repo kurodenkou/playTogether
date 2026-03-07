@@ -153,7 +153,7 @@ function onHostChanged(msg) {
 }
 
 async function onGameStarted(msg) {
-  // msg: { playerOrder, seed, gameType: 'pong'|'nes'|'snes'|'retroarch', romUrl?, coreUrl?, coreWasmUrl? }
+  // msg: { playerOrder, seed, gameType, romUrl?, romId?, romFilename?, coreUrl?, coreWasmUrl? }
   el('preGamePanel').classList.add('hidden');
   el('gamePanel').classList.remove('hidden');
   el('loadingOverlay').classList.remove('hidden');
@@ -164,12 +164,23 @@ async function onGameStarted(msg) {
   for (const pid of msg.playerOrder) controllerMap.set(pid, pid);
 
   try {
+    // Resolve ROM bytes when the host used a local file (romId path).
+    // Guests fetch from the server PouchDB; the host already has it locally.
+    let romBytes    = null;
+    let romFilename = msg.romFilename ?? 'rom';
+    if (msg.romId) {
+      el('loadingOverlay').textContent = 'Fetching ROM from peers…';
+      const result = await romStore.loadROM(msg.romId, romFilename);
+      romBytes    = result.bytes;
+      romFilename = result.filename;
+    }
+
     if (msg.gameType === 'snes') {
-      await startSNESGame(msg.playerOrder, msg.seed, msg.romUrl);
+      await startSNESGame(msg.playerOrder, msg.seed, msg.romUrl, romBytes);
     } else if (msg.gameType === 'nes') {
-      await startNESGame(msg.playerOrder, msg.seed, msg.romUrl);
+      await startNESGame(msg.playerOrder, msg.seed, msg.romUrl, romBytes);
     } else if (msg.gameType === 'retroarch') {
-      await startLibretroGame(msg.playerOrder, msg.seed, msg.romUrl, msg.coreUrl, msg.coreWasmUrl);
+      await startLibretroGame(msg.playerOrder, msg.seed, msg.romUrl, msg.coreUrl, msg.coreWasmUrl, romBytes, romFilename);
     } else {
       startPongGame(msg.playerOrder, msg.seed);
     }
@@ -259,19 +270,47 @@ function enterRoom() {
     el('gameTypeSelect').addEventListener('change', syncGameTypeUI);
     _wireCoreSelect();
 
-    el('startGameBtn').addEventListener('click', () => {
+    el('startGameBtn').addEventListener('click', async () => {
       const gameType    = el('gameTypeSelect').value;
       const romUrl      = el('romUrlInput').value.trim();
+      const romFile     = el('romFileInput').files?.[0] ?? null;
       const coreUrl     = el('coreUrlInput').value.trim();
       const coreWasmUrl = el('coreWasmUrlInput').value.trim();
-      if ((gameType === 'nes' || gameType === 'snes') && !romUrl) {
-        addChatLine('system', 'Enter a ROM URL before starting.');
+      const isRomGame   = gameType === 'nes' || gameType === 'snes' || gameType === 'retroarch';
+
+      if (isRomGame && !romUrl && !romFile) {
+        addChatLine('system', 'Enter a ROM URL or pick a ROM file before starting.');
         return;
       }
       if (gameType === 'retroarch') {
         if (!coreUrl) { addChatLine('system', 'Enter a Core JS URL before starting.'); return; }
-        if (!romUrl)  { addChatLine('system', 'Enter a ROM URL before starting.');     return; }
       }
+
+      // If the host picked a local file, store it in PouchDB and sync to server
+      // before broadcasting the start-game message so guests can pull it.
+      if (romFile) {
+        el('romFileStatus').textContent = 'Syncing ROM to server…';
+        el('startGameBtn').disabled = true;
+        try {
+          const { romId, filename } = await romStore.storeROM(romFile);
+          el('romFileStatus').textContent = `Synced: ${filename}`;
+          net.send({
+            type: 'start-game',
+            gameType,
+            romId,
+            romFilename: filename,
+            coreUrl:     coreUrl     || null,
+            coreWasmUrl: coreWasmUrl || null,
+          });
+        } catch (err) {
+          el('romFileStatus').textContent = `Sync failed: ${err.message}`;
+          console.error('[rom-store] storeROM error', err);
+        } finally {
+          el('startGameBtn').disabled = false;
+        }
+        return;
+      }
+
       net.send({
         type: 'start-game',
         gameType,
@@ -283,6 +322,17 @@ function enterRoom() {
 
     el('rematchBtn').addEventListener('click', () => {
       net.send({ type: 'rematch' });
+    });
+
+    el('romFileInput').addEventListener('change', () => {
+      const file = el('romFileInput').files?.[0];
+      if (file) {
+        el('romFileStatus').textContent = `Selected: ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB) — will sync on Start`;
+        // Clear the URL field so only one source is used
+        el('romUrlInput').value = '';
+      } else {
+        el('romFileStatus').textContent = 'Pick a file from your computer — synced to all players via PouchDB.';
+      }
     });
 
     el('leaveRoomBtn').addEventListener('click', () => {
@@ -356,6 +406,7 @@ function syncGameTypeUI() {
   el('coreUrlRow').classList.toggle('hidden', !isRetroarch);
   el('coreWasmUrlRow').classList.toggle('hidden', !isRetroarch);
   el('romUrlRow').classList.toggle('hidden', !isRomEmulator);
+  el('romFileRow').classList.toggle('hidden', !isRomEmulator);
 
   if (isRetroarch) {
     _populateCoreSelect(); // async; shows #coreSelectRow when cores are available
@@ -533,13 +584,17 @@ function startPongGame(playerOrder, seed) {
 }
 
 /**
- * Start the SNES emulator with the given ROM URL.
+ * Start the SNES emulator with the given ROM URL or pre-fetched bytes.
  * Async — awaits ROM download before starting the engine.
+ * @param {string[]}     playerOrder
+ * @param {number}       seed
+ * @param {string|null}  romUrl    URL to fetch (used when romBytes is null)
+ * @param {ArrayBuffer|null} romBytes  Pre-fetched bytes from PouchDB sync (takes priority)
  */
-async function startSNESGame(playerOrder, seed, romUrl) {
+async function startSNESGame(playerOrder, seed, romUrl, romBytes = null) {
   stopGame();
 
-  if (!romUrl) throw new Error('No ROM URL provided.');
+  if (!romBytes && !romUrl) throw new Error('No ROM URL or file provided.');
 
   const canvas = el('gameCanvas');
 
@@ -549,9 +604,14 @@ async function startSNESGame(playerOrder, seed, romUrl) {
   canvas.style.width  = `${SNESAdapter.SNES_W * 3}px`;
   canvas.style.height = `${SNESAdapter.SNES_H * 3}px`;
 
-  el('loadingOverlay').textContent = 'Fetching ROM…';
   game = new SNESAdapter(canvas, playerOrder);
-  await game.loadROM(romUrl);
+  if (romBytes) {
+    el('loadingOverlay').textContent = 'Loading ROM…';
+    await game.loadROMBytes(romBytes);
+  } else {
+    el('loadingOverlay').textContent = 'Fetching ROM…';
+    await game.loadROM(romUrl);
+  }
 
   el('loadingOverlay').textContent = 'Starting…';
   inputMgr = new InputManager();
@@ -564,13 +624,17 @@ async function startSNESGame(playerOrder, seed, romUrl) {
 }
 
 /**
- * Start the NES emulator with the given ROM URL.
+ * Start the NES emulator with the given ROM URL or pre-fetched bytes.
  * Async — awaits ROM download before starting the engine.
+ * @param {string[]}     playerOrder
+ * @param {number}       seed
+ * @param {string|null}  romUrl    URL to fetch (used when romBytes is null)
+ * @param {ArrayBuffer|null} romBytes  Pre-fetched bytes from PouchDB sync (takes priority)
  */
-async function startNESGame(playerOrder, seed, romUrl) {
+async function startNESGame(playerOrder, seed, romUrl, romBytes = null) {
   stopGame();
 
-  if (!romUrl) throw new Error('No ROM URL provided.');
+  if (!romBytes && !romUrl) throw new Error('No ROM URL or file provided.');
 
   const canvas = el('gameCanvas');
 
@@ -580,9 +644,14 @@ async function startNESGame(playerOrder, seed, romUrl) {
   canvas.style.width  = `${NESAdapter.NES_W * 3}px`;
   canvas.style.height = `${NESAdapter.NES_H * 3}px`;
 
-  el('loadingOverlay').textContent = 'Fetching ROM…';
   game = new NESAdapter(canvas, playerOrder);
-  await game.loadROM(romUrl);
+  if (romBytes) {
+    el('loadingOverlay').textContent = 'Loading ROM…';
+    await game.loadROMBytes(romBytes);
+  } else {
+    el('loadingOverlay').textContent = 'Fetching ROM…';
+    await game.loadROM(romUrl);
+  }
 
   el('loadingOverlay').textContent = 'Starting…';
   inputMgr = new InputManager();
@@ -598,17 +667,19 @@ async function startNESGame(playerOrder, seed, romUrl) {
  * Start a RetroArch game using any libretro core compiled to WebAssembly.
  * Async — loads the core script, then fetches the ROM, then starts the engine.
  *
- * @param {string[]} playerOrder  ordered player IDs
- * @param {number}   seed         shared PRNG seed (unused by libretro cores directly)
- * @param {string}   romUrl       URL of the game ROM
- * @param {string}   coreUrl      URL of the Emscripten JS glue for the libretro core
- * @param {string}   [coreWasmUrl] optional URL of the separate .wasm file (two-file builds)
+ * @param {string[]}     playerOrder  ordered player IDs
+ * @param {number}       seed         shared PRNG seed (unused by libretro cores directly)
+ * @param {string|null}  romUrl       URL of the game ROM (used when romBytes is null)
+ * @param {string}       coreUrl      URL of the Emscripten JS glue for the libretro core
+ * @param {string}       [coreWasmUrl] optional URL of the separate .wasm file (two-file builds)
+ * @param {ArrayBuffer|null} romBytes  Pre-fetched bytes from PouchDB sync (takes priority)
+ * @param {string}       [romFilename] Original filename hint for extension sniffing
  */
-async function startLibretroGame(playerOrder, seed, romUrl, coreUrl, coreWasmUrl) {
+async function startLibretroGame(playerOrder, seed, romUrl, coreUrl, coreWasmUrl, romBytes = null, romFilename = 'rom') {
   stopGame();
 
-  if (!coreUrl) throw new Error('No Core JS URL provided.');
-  if (!romUrl)  throw new Error('No ROM URL provided.');
+  if (!coreUrl)              throw new Error('No Core JS URL provided.');
+  if (!romBytes && !romUrl)  throw new Error('No ROM URL or file provided.');
 
   const canvas = el('gameCanvas');
 
@@ -626,9 +697,14 @@ async function startLibretroGame(playerOrder, seed, romUrl, coreUrl, coreWasmUrl
     canvas,
   );
 
-  el('loadingOverlay').textContent = 'Fetching ROM…';
   game = new LibretroAdapter(canvas, playerOrder, coreModule);
-  await game.loadROM(romUrl);
+  if (romBytes) {
+    el('loadingOverlay').textContent = 'Loading ROM…';
+    await game.loadROMBytes(romBytes, romFilename);
+  } else {
+    el('loadingOverlay').textContent = 'Fetching ROM…';
+    await game.loadROM(romUrl);
+  }
 
   // Apply 3× CSS scaling based on the resolved native resolution.
   canvas.style.width  = `${canvas.width  * 3}px`;

@@ -13,10 +13,24 @@ const WebSocket = require('ws');
 const path = require('path');
 const crypto = require('crypto');
 const fs = require('fs');
+const PouchDB = require('pouchdb');
+const expressPouchDB = require('express-pouchdb');
 
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
+
+// ── PouchDB ROM sync server ────────────────────────────────────────────────────
+// Exposes a CouchDB-compatible HTTP endpoint so browser PouchDB clients can
+// replicate ROM data to/from the server.  ROMs are persisted under data/pouchdb/
+// so they survive server restarts (useful for rooms that share the same ROM).
+const pouchDataDir = path.join(__dirname, 'data', 'pouchdb');
+if (!fs.existsSync(pouchDataDir)) fs.mkdirSync(pouchDataDir, { recursive: true });
+
+const ROMPouchDB = PouchDB.defaults({ prefix: pouchDataDir + path.sep });
+// mode 'minimumForPouchDB' exposes only what PouchDB.sync() requires:
+// _bulk_docs, _bulk_get, _changes, _revs_diff, and attachment handling.
+app.use('/api/romdb', expressPouchDB(ROMPouchDB, { mode: 'minimumForPouchDB' }));
 
 app.use(express.static(path.join(__dirname, 'public'), {
   setHeaders(res, filePath) {
@@ -323,9 +337,17 @@ wss.on('connection', (ws) => {
         const VALID_GAME_TYPES = new Set(['pong', 'nes', 'snes', 'retroarch']);
         const gameType = VALID_GAME_TYPES.has(msg.gameType) ? msg.gameType : 'pong';
 
-        // Only relay romUrl for emulator modes; strip for pong to avoid unexpected data
+        // Only relay romUrl / romId for emulator modes; strip for pong to avoid unexpected data.
+        // romId is used when the host uploaded a local file (synced via PouchDB); romUrl is
+        // used for the classic URL-based flow.  Exactly one should be non-null per game.
         const romUrl = (gameType === 'nes' || gameType === 'snes' || gameType === 'retroarch')
           ? (typeof msg.romUrl === 'string' ? msg.romUrl.slice(0, 2048) : null)
+          : null;
+        const romId = (gameType === 'nes' || gameType === 'snes' || gameType === 'retroarch')
+          ? (typeof msg.romId === 'string' ? msg.romId.slice(0, 128) : null)
+          : null;
+        const romFilename = (gameType === 'nes' || gameType === 'snes' || gameType === 'retroarch')
+          ? (typeof msg.romFilename === 'string' ? msg.romFilename.slice(0, 256) : null)
           : null;
 
         // Relay the libretro core JS URL for retroarch mode (two optional fields)
@@ -342,6 +364,8 @@ wss.on('connection', (ws) => {
           seed,
           gameType,
           romUrl,
+          romId,
+          romFilename,
           coreUrl,
           coreWasmUrl,
         });
