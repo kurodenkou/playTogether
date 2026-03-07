@@ -175,8 +175,9 @@ async function onGameStarted(msg) {
     let romBytes    = null;
     let romFilename = msg.romFilename ?? 'rom';
     if (msg.romId) {
-      el('loadingOverlay').textContent = 'Fetching ROM from peers…';
-      const result = await romStore.loadROM(msg.romId, romFilename);
+      const result = await romStore.loadROM(msg.romId, romFilename, (text) => {
+        el('loadingOverlay').textContent = text;
+      });
       romBytes    = result.bytes;
       romFilename = result.filename;
     }

@@ -76,27 +76,42 @@ class ROMStore {
 
   /**
    * Load a ROM's bytes from local PouchDB, replicating from the server first
-   * if the document is not present locally.
+   * if the document is not present locally.  Retries with back-off to handle
+   * the case where the host's upload replication is still in-flight.
    *
-   * @param {string} romId     SHA-256 hex of the ROM content
-   * @param {string} [filename] fallback filename if not stored in PouchDB
+   * @param {string} romId       SHA-256 hex of the ROM content
+   * @param {string} [filename]  fallback filename if not stored in PouchDB
+   * @param {function} [onProgress]  optional (message: string) => void callback
    * @returns {Promise<{bytes: ArrayBuffer, filename: string}>}
    */
-  async loadROM(romId, filename = 'rom') {
+  async loadROM(romId, filename = 'rom', onProgress) {
     const docId = `rom:${romId}`;
 
-    // Try local first
+    // Try local first (host already has it, or cached from a prior session)
     const local = await this._tryLoadLocal(docId);
     if (local) return local;
 
-    // Not local — replicate the specific doc from the server
-    await this._replicateFrom(docId);
+    // Pull from server with retries — the host's replication may still be
+    // in-flight when guests receive game-started and start fetching.
+    const MAX_ATTEMPTS = 8;
+    const RETRY_DELAY_MS = 2000;
 
-    const result = await this._tryLoadLocal(docId);
-    if (!result) {
-      throw new Error(`ROM ${romId} not found in server PouchDB — the host may not have synced it yet.`);
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      const label = attempt === 1
+        ? 'Fetching ROM from server…'
+        : `Fetching ROM… (retry ${attempt - 1}/${MAX_ATTEMPTS - 1})`;
+      onProgress?.(label);
+
+      await this._replicateFrom(docId);
+      const result = await this._tryLoadLocal(docId);
+      if (result) return result;
+
+      if (attempt < MAX_ATTEMPTS) {
+        await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+      }
     }
-    return result;
+
+    throw new Error('ROM not found on server after several attempts — check that the host\'s file synced successfully.');
   }
 
   // ── Private helpers ────────────────────────────────────────────────────────
