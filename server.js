@@ -198,6 +198,37 @@ function genId(bytes) {
   return crypto.randomBytes(bytes).toString('hex').toUpperCase();
 }
 
+const WORDS = [
+  'ant','ape','arc','art','ash','awe','axe','bay','bee','bin',
+  'bit','bog','bow','box','bug','bun','bus','cab','can','cap',
+  'cat','cob','cod','cog','cop','cow','cup','cut','dam','den',
+  'dew','dig','dim','dip','dog','dot','dub','dug','dye','ear',
+  'eel','egg','elk','elm','emu','era','eve','ewe','fan','far',
+  'fig','fin','fit','fly','fog','fox','fun','fur','gap','gem',
+  'gin','gnu','gut','hay','hen','hew','hog','hop','hub','hug',
+  'hut','ice','imp','ink','ion','ivy','jab','jar','jaw','jet',
+  'jot','joy','jug','keg','key','kid','kin','kit','lab','lag',
+  'lap','law','lea','led','leg','lid','lip','lit','log','lot',
+  'lug','map','mat','mew','mob','mod','mop','mud','mug','nap',
+  'net','nib','nip','nod','nun','oak','oar','oat','odd','oil',
+  'orb','ore','owe','owl','pan','pap','par','pat','paw','pea',
+  'peg','pen','pet','pie','pig','pin','pit','pod','pop','pot',
+  'pry','pub','pug','pun','pup','pus','rag','ram','ran','rat',
+  'raw','ray','rib','rid','rig','rip','rob','rod','rot','row',
+  'rub','rug','rum','run','rut','rye','sap','sat','saw','sax',
+  'say','sea','set','sew','shy','sin','sip','sit','ski','sky',
+  'sly','sob','sod','son','sow','spa','spy','sty','sub','sue',
+  'sum','sun','tab','tan','tap','tar','tax','tea','tin','tip',
+  'toe','tog','top','tow','toy','tub','tug','van','vat','vet',
+  'vow','wag','war','wax','web','wed','wig','win','wit','woe',
+  'wok','wop','yak','yam','yap','yew','zap','zen','zig','zip',
+];
+
+function genRoomId() {
+  const pick = () => WORDS[Math.floor(Math.random() * WORDS.length)];
+  return (pick() + '-' + pick()).toUpperCase();
+}
+
 class Room {
   constructor(id, hostId) {
     this.id = id;
@@ -266,7 +297,7 @@ wss.on('connection', (ws) => {
       // ── Create a new room ───────────────────────────────────────────────
       case 'create-room': {
         const newPlayerId = genId(4);
-        const newRoomId = genId(3);
+        const newRoomId = genRoomId();
         const newRoom = new Room(newRoomId, newPlayerId);
         const name = sanitizeName(msg.playerName);
         newRoom.addPlayer(newPlayerId, name, ws);
