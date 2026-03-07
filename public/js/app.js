@@ -111,6 +111,8 @@ function bindNetworkEvents() {
     .on('rematch',               onRematch)
     .on('input',                 onRemoteInput)
     .on('controller-transferred', onControllerTransferred)
+    .on('rom-ready-status',      onRomReadyStatus)
+    .on('all-ready',             onAllReady)
     .on('chat',                  onChat)
     .on('error', msg => {
       showStatus('lobby', msg.message, true);
@@ -184,7 +186,11 @@ async function onGameStarted(msg) {
     } else {
       startPongGame(msg.playerOrder, msg.seed);
     }
-    el('loadingOverlay').classList.add('hidden');
+
+    // Signal that this client has loaded its ROM and is ready to play.
+    // The engine will only start once the server confirms all players are ready.
+    el('loadingOverlay').textContent = 'Waiting for all players…';
+    net.send({ type: 'rom-ready' });
   } catch (err) {
     el('loadingOverlay').textContent = `Error: ${err.message}`;
     el('loadingOverlay').classList.add('error');
@@ -202,6 +208,18 @@ function onRematch() {
   updateHostControls();
   updatePlayerList();
   addChatLine('system', 'Host started a rematch — waiting for players.');
+}
+
+function onRomReadyStatus(msg) {
+  if (!el('loadingOverlay').classList.contains('hidden')) {
+    el('loadingOverlay').textContent = `Waiting for players… (${msg.readyCount}/${msg.totalCount})`;
+  }
+}
+
+function onAllReady() {
+  if (!engine) return;
+  engine.start();
+  el('loadingOverlay').classList.add('hidden');
 }
 
 function onRemoteInput(msg) {
@@ -734,7 +752,8 @@ function _startEngine(playerOrder) {
     net.send({ type: 'input', frame, playerId: slotPlayerId, input });
   };
 
-  engine.start();
+  // engine.start() is intentionally deferred — it will be called in onAllReady()
+  // once the server confirms every player has loaded their ROM.
 
   updateHostControls();
   updatePlayerList();

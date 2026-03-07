@@ -238,6 +238,8 @@ class Room {
     this.gameStarted = false;
     /** Ordered player IDs used for the current/last game */
     this.playerOrder = [];
+    /** Players who have confirmed their ROM is loaded and ready to start */
+    this.romReady = new Set();
   }
 
   addPlayer(playerId, name, ws) {
@@ -360,6 +362,7 @@ wss.on('connection', (ws) => {
 
         room.gameStarted = true;
         room.playerOrder = [...room.players.keys()];
+        room.romReady = new Set();
 
         // Shared PRNG seed so all clients start with identical RNG state
         const seed = Date.now() & 0x7fffffff;
@@ -421,6 +424,27 @@ wss.on('connection', (ws) => {
         break;
       }
 
+      // ── Player confirms ROM is loaded and ready to play ─────────────────
+      case 'rom-ready': {
+        if (!room || !playerId) return;
+        if (!room.gameStarted) return;
+        room.romReady.add(playerId);
+        console.log(`[room] rom-ready ${playerId} in ${room.id} (${room.romReady.size}/${room.playerOrder.length})`);
+        // Broadcast current ready status so clients can show progress
+        room.broadcastAll({
+          type: 'rom-ready-status',
+          readyCount: room.romReady.size,
+          totalCount: room.playerOrder.length,
+        });
+        // Once all players in the game are ready, fire the start signal
+        const allReady = room.playerOrder.every(id => room.romReady.has(id));
+        if (allReady) {
+          room.broadcastAll({ type: 'all-ready' });
+          console.log(`[room] all-ready in ${room.id}`);
+        }
+        break;
+      }
+
       // ── Transfer a controller slot to another player ─────────────────────
       case 'transfer-controller': {
         if (!room || !playerId) return;
@@ -455,6 +479,7 @@ wss.on('connection', (ws) => {
         if (!room || room.hostId !== playerId) return;
         room.gameStarted = false;
         room.playerOrder = [];
+        room.romReady = new Set();
         room.broadcastAll({ type: 'rematch' });
         break;
       }
