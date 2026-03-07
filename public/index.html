@@ -150,7 +150,10 @@
         <div id="romFileRow" class="field-group hidden" style="margin-bottom:10px;">
           <label for="romFileInput">— or ROM File (desktop)</label>
           <input type="file" id="romFileInput" accept=".nes,.sfc,.smc,.rom,.zip,.gb,.gbc,.gba,.md,.smd,.gen,.pce,.nds">
-          <span id="romFileStatus" class="field-hint">Pick a file from your computer — synced to all players via PouchDB.</span>
+          <div style="display:flex;gap:6px;align-items:center;margin-top:4px;">
+            <button id="syncRomBtn" style="display:none;">Sync ROM</button>
+            <span id="romFileStatus" class="field-hint">Pick a file from your computer — synced to all players via server.</span>
+          </div>
         </div>
 
         <div class="host-controls">

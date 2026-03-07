@@ -32,6 +32,52 @@ const ROMPouchDB = PouchDB.defaults({ prefix: pouchDataDir + path.sep });
 // _bulk_docs, _bulk_get, _changes, _revs_diff, and attachment handling.
 app.use('/api/romdb', expressPouchDB(ROMPouchDB, { mode: 'minimumForPouchDB' }));
 
+// ── Direct ROM upload/download ─────────────────────────────────────────────────
+// Simple in-process ROM store keyed by SHA-256.  Bypasses PouchDB replication
+// so the host can reliably upload a file and guests can reliably download it.
+// ROMs live only for the lifetime of the server process (no persistence needed
+// beyond the session; PouchDB handles long-term caching on each client).
+
+/** @type {Map<string, {filename: string, buf: Buffer}>} */
+const romStore = new Map();
+const ROM_UPLOAD_MAX_BYTES = 64 * 1024 * 1024; // 64 MB
+
+// Host uploads ROM bytes directly.
+app.post('/api/rom',
+  express.raw({ type: 'application/octet-stream', limit: '64mb' }),
+  (req, res) => {
+    const romId   = String(req.headers['x-rom-id']   ?? '').toLowerCase();
+    const filename = String(req.headers['x-rom-filename'] ?? 'rom').slice(0, 256);
+
+    if (!/^[0-9a-f]{64}$/.test(romId)) {
+      return res.status(400).json({ error: 'Invalid x-rom-id header (expected 64-char hex)' });
+    }
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+      return res.status(400).json({ error: 'Empty body' });
+    }
+    if (req.body.length > ROM_UPLOAD_MAX_BYTES) {
+      return res.status(413).json({ error: 'ROM too large (max 64 MB)' });
+    }
+
+    romStore.set(romId, { filename, buf: req.body });
+    console.log(`[rom] stored ${romId.slice(0, 8)}… "${filename}" (${req.body.length} bytes)`);
+    res.json({ ok: true, romId });
+  }
+);
+
+// Guests download ROM bytes directly.
+app.get('/api/rom/:romId', (req, res) => {
+  const romId = String(req.params.romId).toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(romId)) return res.status(400).send('Invalid romId');
+
+  const entry = romStore.get(romId);
+  if (!entry) return res.status(404).send('ROM not found — host may not have synced yet');
+
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('X-ROM-Filename', entry.filename);
+  res.send(entry.buf);
+});
+
 app.use(express.static(path.join(__dirname, 'public'), {
   setHeaders(res, filePath) {
     if (filePath.endsWith('.wasm')) {

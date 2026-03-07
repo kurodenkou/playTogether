@@ -314,14 +314,16 @@ function enterRoom() {
         if (!coreUrl) { addChatLine('system', 'Enter a Core JS URL before starting.'); return; }
       }
 
-      // If the host picked a local file, store it in PouchDB and sync to server
-      // before broadcasting the start-game message so guests can pull it.
+      // If the host picked a local file, upload to server before broadcasting
+      // start-game so guests can download it immediately.
       if (romFile) {
-        el('romFileStatus').textContent = 'Syncing ROM to server…';
         el('startGameBtn').disabled = true;
         try {
-          const { romId, filename } = await romStore.storeROM(romFile);
+          const { romId, filename } = await romStore.storeROM(romFile, (text) => {
+            el('romFileStatus').textContent = text;
+          });
           el('romFileStatus').textContent = `Synced: ${filename}`;
+          el('syncRomBtn').textContent = 'Sync ROM ✓';
           net.send({
             type: 'start-game',
             gameType,
@@ -355,11 +357,32 @@ function enterRoom() {
     el('romFileInput').addEventListener('change', () => {
       const file = el('romFileInput').files?.[0];
       if (file) {
-        el('romFileStatus').textContent = `Selected: ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB) — will sync on Start`;
+        el('romFileStatus').textContent = `Selected: ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)`;
+        el('syncRomBtn').style.display = '';
+        el('syncRomBtn').textContent = 'Sync ROM';
+        el('syncRomBtn').disabled = false;
         // Clear the URL field so only one source is used
         el('romUrlInput').value = '';
       } else {
-        el('romFileStatus').textContent = 'Pick a file from your computer — synced to all players via PouchDB.';
+        el('romFileStatus').textContent = 'Pick a file from your computer — synced to all players via server.';
+        el('syncRomBtn').style.display = 'none';
+      }
+    });
+
+    el('syncRomBtn').addEventListener('click', async () => {
+      const file = el('romFileInput').files?.[0];
+      if (!file) return;
+      el('syncRomBtn').disabled = true;
+      try {
+        await romStore.storeROM(file, (text) => {
+          el('romFileStatus').textContent = text;
+        });
+        el('romFileStatus').textContent = `Synced: ${file.name}`;
+        el('syncRomBtn').textContent = 'Sync ROM ✓';
+      } catch (err) {
+        el('romFileStatus').textContent = `Sync failed: ${err.message}`;
+        el('syncRomBtn').textContent = 'Retry Sync';
+        el('syncRomBtn').disabled = false;
       }
     });
 
