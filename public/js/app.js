@@ -34,6 +34,9 @@ let inputMgr = null;
 /** @type {Array|null} cached result from GET /api/cores (null = not yet fetched) */
 let _coresCache = null;
 
+/** True once this client has sent rom-ready for the current game session. */
+let _localRomReady = false;
+
 /**
  * Maps slotPlayerId → actualClientId (who currently controls each controller slot).
  * Populated when a game starts; updated on controller-transferred events.
@@ -156,6 +159,7 @@ function onHostChanged(msg) {
 
 async function onGameStarted(msg) {
   // msg: { playerOrder, seed, gameType, romUrl?, romId?, romFilename?, coreUrl?, coreWasmUrl? }
+  _localRomReady = false;
   el('preGamePanel').classList.add('hidden');
   el('gamePanel').classList.remove('hidden');
   el('loadingOverlay').classList.remove('hidden');
@@ -189,6 +193,7 @@ async function onGameStarted(msg) {
 
     // Signal that this client has loaded its ROM and is ready to play.
     // The engine will only start once the server confirms all players are ready.
+    _localRomReady = true;
     el('loadingOverlay').textContent = 'Waiting for all players…';
     net.send({ type: 'rom-ready' });
   } catch (err) {
@@ -200,6 +205,7 @@ async function onGameStarted(msg) {
 
 function onRematch() {
   stopGame();
+  _localRomReady = false;
   controllerMap = new Map();
   el('preGamePanel').classList.remove('hidden');
   el('gamePanel').classList.add('hidden');
@@ -211,7 +217,10 @@ function onRematch() {
 }
 
 function onRomReadyStatus(msg) {
-  if (!el('loadingOverlay').classList.contains('hidden')) {
+  // Only show the waiting count after this client has finished loading its own ROM.
+  // Before that, preserve the loading progress text so the player isn't confused
+  // into thinking they're waiting when they're actually still fetching.
+  if (_localRomReady && !el('loadingOverlay').classList.contains('hidden')) {
     el('loadingOverlay').textContent = `Waiting for players… (${msg.readyCount}/${msg.totalCount})`;
   }
 }
