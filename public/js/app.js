@@ -83,6 +83,20 @@ function bindLobbyUI() {
 
   el('joinRoomBtn').addEventListener('click', doJoinRoom);
   el('roomCodeInput').addEventListener('keydown', e => { if (e.key === 'Enter') doJoinRoom(); });
+
+  el('genNameBtn').addEventListener('click', () => {
+    el('playerName').value = _generateName();
+  });
+}
+
+// Adjective + noun pairs for random name generation (matching code.x01.ninja style).
+const _NAME_ADJS  = ['Swift','Calm','Bold','Wild','Keen','Cool','Dark','Grim','Sage','Neon','Iron','Jade','Ruby','Gold','Silver'];
+const _NAME_NOUNS = ['Fox','Wolf','Bear','Hawk','Lion','Sage','Star','Moon','Storm','Ember','Frost','Blaze','Cedar','River','Peak'];
+
+function _generateName() {
+  const adj  = _NAME_ADJS [Math.floor(Math.random() * _NAME_ADJS.length)];
+  const noun = _NAME_NOUNS[Math.floor(Math.random() * _NAME_NOUNS.length)];
+  return `${adj}${noun}`;
 }
 
 function doJoinRoom() {
@@ -796,7 +810,13 @@ function _startEngine(playerOrder) {
 function stopGame() {
   engine?.stop();
   engine = null;
-  game?.stopAudio?.();
+  // destroy() calls retro_deinit, releases the WebGL context, and stops audio.
+  // For non-libretro adapters that lack destroy(), fall back to stopAudio().
+  if (typeof game?.destroy === 'function') {
+    game.destroy();
+  } else {
+    game?.stopAudio?.();
+  }
   game   = null;
   inputMgr?.destroy();
   inputMgr = null;
@@ -804,6 +824,22 @@ function stopGame() {
   // Clear libretro core globals so the next loadCore() starts from a clean slate.
   delete window.Module;
   delete window.LibretroCore;
+  // Replace the canvas element so the next game gets a pristine context
+  // with no stale WebGL state, event listeners, or 2D drawing state.
+  _resetGameCanvas();
+}
+
+/**
+ * Swap #gameCanvas for a fresh canvas element.
+ * This guarantees there is no leftover WebGL / 2D context when the next
+ * libretro core calls canvas.getContext('webgl2') during loadCore().
+ */
+function _resetGameCanvas() {
+  const old = el('gameCanvas');
+  if (!old) return;
+  const canvas = document.createElement('canvas');
+  canvas.id = 'gameCanvas';
+  old.parentNode.replaceChild(canvas, old);
 }
 
 // ── HUD ───────────────────────────────────────────────────────────────────────

@@ -12,17 +12,22 @@
      LOBBY VIEW
 ══════════════════════════════════════════════════════════════════════════════ -->
 <div id="view-lobby" class="view">
-  <div class="lobby-card">
-    <h1>playTogether</h1>
-    <p class="tagline">JS emulator platform · rollback netcode</p>
+  <header class="lobby-header">
+    <span class="lobby-wordmark">playTogether</span>
+    <span class="lobby-subtitle">JS emulator platform · rollback netcode</span>
+  </header>
 
+  <div class="lobby-card">
     <div class="field-group">
       <label for="playerName">Your name</label>
-      <input type="text" id="playerName" placeholder="Player" maxlength="24" autocomplete="off">
+      <div class="name-group">
+        <input type="text" id="playerName" placeholder="Player" maxlength="24" autocomplete="off">
+        <button id="genNameBtn" class="gen-btn" title="Generate a random name">⚡</button>
+      </div>
     </div>
 
     <div class="lobby-actions">
-      <button id="createRoomBtn" class="primary">Create Room</button>
+      <button id="createRoomBtn" class="primary">Create Room →</button>
     </div>
 
     <div class="lobby-divider">or join existing</div>
