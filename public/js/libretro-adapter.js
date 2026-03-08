@@ -1474,6 +1474,40 @@ class LibretroAdapter {
     }
   }
 
+  /**
+   * Fully unload the libretro core: call retro_deinit, release the WebGL
+   * context so the canvas can be reused by the next core, and stop audio.
+   * Should be called from stopGame() before setting game = null.
+   */
+  destroy() {
+    // Remove GL context event listeners so they don't fire after destruction.
+    this._glContextListeners?.abort();
+    this._glContextListeners = null;
+
+    // Let the core release its own WASM resources.
+    if (this._romLoaded) {
+      try { this.M._retro_deinit?.(); } catch (_) {}
+    }
+
+    // Force-lose the WebGL context so the browser can issue a fresh one for
+    // the next core.  Without this, canvas.getContext('webgl2') on a rematch
+    // may return the still-live context from the old core's Emscripten GL layer.
+    const glCtx = this._glContext ?? this.canvas?.getContext('webgl2');
+    if (glCtx) {
+      try {
+        const ext = glCtx.getExtension('WEBGL_lose_context');
+        if (ext) ext.loseContext();
+      } catch (_) {}
+    }
+    this._glContext = null;
+    this._glHandle  = 0;
+
+    // Clear the 2D context reference (software-rendered cores).
+    this.ctx = null;
+
+    this.stopAudio();
+  }
+
   // ── ROM loading ──────────────────────────────────────────────────────────────
 
   /**
